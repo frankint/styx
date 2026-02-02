@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 workload_name=$1
 input_rate=$2

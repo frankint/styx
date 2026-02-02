@@ -17,7 +17,8 @@ warmup_seconds=$8
 epoch_size=$9
 workload_name=${10}
 n_keys=${11}
-regenerate_tpcc_data=${12:-false}
+styx_threads_per_worker=${12}
+regenerate_tpcc_data=${13:-false}
 
 # Determine the maximum number of partitions
 if (( start_n_part > end_n_part )); then
@@ -27,7 +28,7 @@ else
 fi
 
 # Start the Styx cluster
-bash "$ROOT_DIR/scripts/start_styx_cluster.sh" "$n_workers" "$epoch_size" "$max_part" "true" "true" "true"
+bash "$ROOT_DIR/scripts/start_styx_cluster.sh" "$n_workers" "$epoch_size" "$max_part" "$styx_threads_per_worker" "true" "true" "true"
 sleep 10
 
 # Run workload

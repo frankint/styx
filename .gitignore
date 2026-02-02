@@ -151,3 +151,4 @@ grafana-enterprise-11.5.1.darwin-amd64.tar.gz
 !grafana/dashboards/server_specific.json
 !grafana/*
 grafana_data/
+ycsb_dataset_4p.pkl

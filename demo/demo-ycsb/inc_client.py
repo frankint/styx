@@ -15,7 +15,9 @@ import kafka_output_consumer
 import calculate_metrics
 import os
 from datetime import datetime
-from export_metadata import save_metadata
+
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from export_metadata import MetadataParams, save_metadata
 from tqdm import tqdm
 
 from ycsb import ycsb_operator
@@ -71,6 +73,7 @@ def ycsb_init(styx: SyncStyxClient, operator: Operator, keys: list[int]):
         partitions[partition] |= {i: STARTING_MONEY}
         if i % 100_000 == 0 or i == len(keys) - 1:
             for partition, kv_pairs in partitions.items():
+                # TODO: THIS WAS REMOVED - REFACTOR
                 styx.send_batch_insert(operator=operator,
                                        partition=partition,
                                        function='insert_batch',
@@ -222,5 +225,20 @@ if __name__ == "__main__":
         run_with_validation
     )
 
-    save_metadata("ycsb", start_time, end_time, SAVE_DIR, N_PARTITIONS, 
-        messages_per_second * threads, N_ENTITIES, seconds, INTERVAL_SECONDS, DELTA_TPS, ZIPF_CONST, epoch_size)
+    save_metadata(
+        MetadataParams(
+            workload="ycsb",
+            start=start_time,
+            end=end_time,
+            out_path=SAVE_DIR,
+            n_partitions=N_PARTITIONS,
+            messages_per_second=messages_per_second * threads,
+            n_keys=N_ENTITIES,
+            seconds=seconds,
+            zipf_const=ZIPF_CONST,
+            epoch_size=epoch_size,
+            warmup_seconds=warmup_seconds,
+            interval_seconds=INTERVAL_SECONDS,
+            delta_tps=DELTA_TPS,
+        )
+    )

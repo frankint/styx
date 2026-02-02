@@ -16,6 +16,7 @@ class HashPartitioner(BasePartitioner):
 
     def update_partitions(self, partitions: int):
         self._partitions = partitions
+        self.get_partition.cache_clear()
 
     @property
     def partitions(self):

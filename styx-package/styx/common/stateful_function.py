@@ -89,10 +89,10 @@ class StatefulFunction(Function):
                 worker_id_old_partition = self.__state.get_worker_id_old_partition(self.__operator_name,
                                                                                    self.__partition,
                                                                                    self.__key)
-
-                is_local: bool = (self.__operator_name, worker_id_old_partition[1]) in self.__state.operator_partitions
-
-                if is_local:
+                # The key may have arrived via async migration between in_remote_keys check and get_worker_id_old_partition
+                if worker_id_old_partition is None:
+                    self.__operator_lock.release()
+                elif (self.__operator_name, worker_id_old_partition[1]) in self.__state.operator_partitions:
                     # Transfer the key from another partition within the same worker
                     self.__state.migrate_within_the_same_worker(self.__operator_name,
                                                                 self.__partition,
@@ -101,7 +101,7 @@ class StatefulFunction(Function):
                     self.__operator_lock.release()
                 else:
                     # Get the key from a remote worker
-                    # logging.warning(f"{self.__request_id} | Requesting {self.__operator_name}:{self.__partition} "
+                    #logging.warning(f"{self.__request_id} | Requesting {self.__operator_name}:{self.__partition} "
                     #                 f"-> {self.__key} from remote")
                     await self.__networking.request_key(self.__operator_name,
                                                         self.__partition,

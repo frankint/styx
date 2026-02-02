@@ -187,10 +187,12 @@ class Coordinator(object):
         for operator_name, operator in iter(new_stateflow_graph):
             for partition in range(MAX_OPERATOR_PARALLELISM):
                 operator_copy = deepcopy(operator)
-                if partition > operator.n_partitions:
+                # Partitions are [0, n_partitions). Everything >= n_partitions is a shadow partition.
+                if partition >= operator.n_partitions:
                     operator_copy.make_shadow()
                 self.worker_pool.update_operator((operator_copy.name, partition), operator_copy)
         worker_assignments = self.worker_pool.get_worker_assignments()
+        logging.warning(f"WORKER ASSIGNMENTS: {worker_assignments}")
         tasks = [self.networking.send_message(worker.worker_ip, worker.worker_port,
                                               msg=(new_stateflow_graph,
                                                   worker_assignments[(worker.worker_ip,
@@ -208,6 +210,28 @@ class Coordinator(object):
         await self.kafka_metadata_producer.send_and_wait('styx-metadata',
                                                          key=metadata_key,
                                                          value=serialized_graph)
+
+    def reschedule_all_partitions_round_robin(self, stateflow_graph: StateflowGraph) -> None:
+        """
+        Clears all current assignments and reschedules *all* operator partitions (including shadow ones)
+        across all live workers.
+        """
+        live_workers = self.worker_pool.get_live_workers()
+        logging.warning(f"Number of live workers: {len(live_workers)}")
+        if not live_workers:
+            logging.warning("Reschedule requested but no live workers are registered.")
+            return
+
+        self.worker_pool.reset_all_assignments()
+        for operator_name, operator in iter(stateflow_graph):
+            for partition in range(operator.n_partitions):
+                operator_copy = deepcopy(operator)
+                self.worker_pool.schedule_operator_partition((operator_name, partition), operator_copy)
+        for operator_name, operator in iter(stateflow_graph):
+            for shadow_partition in range(operator.n_partitions, MAX_OPERATOR_PARALLELISM):
+                operator_copy = deepcopy(operator)
+                operator_copy.make_shadow()
+                self.worker_pool.schedule_operator_partition((operator_name, shadow_partition), operator_copy)
 
 
     async def submit_stateflow_graph(self,
@@ -266,17 +290,7 @@ class Coordinator(object):
             logging.warning("Rebalance requested but no completed snapshot is available yet.")
             return
 
-        # Reset all assignments and re-schedule partitions round-robin across live workers.
-        self.worker_pool.reset_all_assignments()
-        for operator_name, operator in iter(self.submitted_graph):
-            for partition in range(operator.n_partitions):
-                operator_copy = deepcopy(operator)
-                self.worker_pool.schedule_operator_partition((operator_name, partition), operator_copy)
-        for operator_name, operator in iter(self.submitted_graph):
-            for shadow_partition in range(operator.n_partitions, MAX_OPERATOR_PARALLELISM):
-                operator_copy = deepcopy(operator)
-                operator_copy.make_shadow()
-                self.worker_pool.schedule_operator_partition((operator_name, shadow_partition), operator_copy)
+        self.reschedule_all_partitions_round_robin(self.submitted_graph)
 
         logging.warning(
             f"Rebalance | live_workers={len(self.worker_pool.get_live_workers())} "
@@ -294,6 +308,7 @@ class Coordinator(object):
             except KafkaException:
                 logging.warning(f'Kafka at {KAFKA_URL} not ready yet, sleeping for 1 second')
                 time.sleep(1)
+        logging.warning(f"MAX OPERATOR PARALLELISM: {MAX_OPERATOR_PARALLELISM}")
         topics = (
                 [NewTopic(topic='styx-metadata', num_partitions=1, replication_factor=KAFKA_REPLICATION_FACTOR)] +
                 [NewTopic(topic='sequencer-wal', num_partitions=1, replication_factor=KAFKA_REPLICATION_FACTOR)] +

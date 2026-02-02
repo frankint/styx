@@ -32,7 +32,9 @@ import kafka_output_consumer
 import calculate_metrics
 import os
 from datetime import datetime
-from export_metadata import save_metadata
+
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from export_metadata import MetadataParams, save_metadata
 
 
 random.seed(42)
@@ -480,4 +482,17 @@ if __name__ == "__main__":
         use_fallback_cache
     )
 
-    save_metadata("tpcc", start_time, end_time, SAVE_DIR, N_PARTITIONS, messages_per_second * threads, N_W, seconds, epoch_size)
+    save_metadata(
+        MetadataParams(
+            workload="tpcc",
+            start=start_time,
+            end=end_time,
+            out_path=SAVE_DIR,
+            n_partitions=N_PARTITIONS,
+            messages_per_second=messages_per_second * threads,
+            n_keys=N_W,
+            seconds=seconds,
+            epoch_size=epoch_size,
+            warmup_seconds=warmup_seconds,
+        )
+    )

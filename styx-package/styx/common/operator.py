@@ -13,7 +13,7 @@ from .base_operator import BaseOperator
 from .base_protocol import BaseTransactionalProtocol
 from .stateful_function import StatefulFunction
 from .exceptions import OperatorDoesNotContainFunction
-# from .logging import logging
+from .logging import logging
 from .partitioning.hash_partitioner import HashPartitioner
 
 
@@ -130,6 +130,7 @@ class Operator(BaseOperator):
             if isinstance(resp, Exception):
                 await self._send_chain_abort(str(resp), ack_host, ack_port, ack_id)
                 success = False
+                logging.warning(f"Transaction {t_id} failed because we got an exception: {resp}")
             elif fallback_mode and use_fallback_cache:
                 await self.__send_cache_ack(ack_host, ack_port, ack_id)
             elif n_remote_calls == 0:

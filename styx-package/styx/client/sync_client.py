@@ -282,3 +282,17 @@ class SyncStyxClient(BaseStyxClient):
         s.connect((self._styx_coordinator_adr, self._styx_coordinator_port))
         s.send(msg)
         s.close()
+
+    def submit_manual_scale(self, new_n_partitions: int):
+        """Submits a manual scale request to the Styx coordinator.
+
+        Args:
+            new_n_partitions (int): The new number of partitions.
+        """
+        msg = NetworkingManager.encode_message(msg=(new_n_partitions, ),
+                                               msg_type=MessageType.ManualScale,
+                                               serializer=Serializer.CLOUDPICKLE)
+        s = socket.socket()
+        s.connect((self._styx_coordinator_adr, self._styx_coordinator_port))
+        s.send(msg)
+        s.close()

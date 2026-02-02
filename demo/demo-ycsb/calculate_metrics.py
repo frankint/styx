@@ -89,8 +89,6 @@ def main(
     req_ids = output_msgs['request_id']
     dup = output_msgs[req_ids.isin(req_ids[req_ids.duplicated()])].sort_values("request_id")
 
-    print(f" Output messages: {output_msgs.head()}")
-
     res_dict = {
         "duplicate_requests": duplicate_requests,
         "exactly_once_output": exactly_once_output,

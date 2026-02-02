@@ -68,7 +68,8 @@ class WorkerPool(object):
         This is useful for manual rebalance (e.g., after scaling up), where we want to
         redistribute partitions across *all* live workers.
         """
-        live_workers = self.get_live_workers()
+        # Make the live workers list deterministic by sorting by worker_id
+        live_workers = sorted(self.get_live_workers(), key=lambda w: w.worker_id)
         for w in live_workers:
             w.assigned_operators = {}
         self.operator_partition_to_worker.clear()

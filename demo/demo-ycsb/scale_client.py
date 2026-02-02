@@ -3,6 +3,7 @@ import time
 import multiprocessing
 multiprocessing.set_start_method("fork", force=True)
 from multiprocessing import Pool
+import traceback
 
 import pandas as pd
 from timeit import default_timer as timer
@@ -19,7 +20,7 @@ import os
 from datetime import datetime
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata
+from export_metadata import MetadataParams, save_metadata, get_migration_times
 from tqdm import tqdm
 
 from ycsb import ycsb_operator
@@ -51,6 +52,7 @@ if not os.path.exists(SAVE_DIR):
 warmup_seconds: int = int(sys.argv[8])
 run_with_validation = sys.argv[9].lower() == "true"
 epoch_size = int(sys.argv[10])
+manual_scale_time = int(sys.argv[11])
 
 ####################################################################################################################
 g = StateflowGraph('ycsb-benchmark', operator_state_backend=LocalStateBackend.DICT)
@@ -99,41 +101,57 @@ def read_only_ycsb_generator(keys, operator: Operator, n: int, zipf_const: float
 
 
 def benchmark_runner(proc_num) -> dict[bytes, dict]:
-    print(f'Generator: {proc_num} starting')
-    styx = SyncStyxClient(STYX_HOST, STYX_PORT, kafka_url=KAFKA_URL)
-    time.sleep(proc_num * 0.2)
-    styx.open(consume=False)
-    ycsb_generator = transactional_ycsb_generator(key_list, ycsb_operator, N_ENTITIES, zipf_const=ZIPF_CONST)
-    timestamp_futures: dict[bytes, dict] = {}
-    time.sleep(5)
-    barrier.wait()
-    start = timer()
-    for sec in range(seconds):
-        sec_start = timer()
-        for i in range(messages_per_second):
-            if i % (messages_per_second // sleeps_per_second) == 0:
-                time.sleep(sleep_time)
-            operator, key, func_name, params = next(ycsb_generator)
-            future = styx.send_event(operator=operator,
-                                     key=key,
-                                     function=func_name,
-                                     params=params)
-            timestamp_futures[future.request_id] = {"op": f'{func_name} {key}->{params[0]}'}
-        styx.flush()
-        sec_end = timer()
-        lps = sec_end - sec_start
-        if lps < 1:
-            time.sleep(1 - lps)
-        sec_end2 = timer()
-        print(f'{sec} | Latency per second: {sec_end2 - sec_start}')
-    end = timer()
-    print(f'Average latency per second: {(end - start) / seconds}')
+    try:
+        print(f'Generator: {proc_num} starting')
+        styx = SyncStyxClient(STYX_HOST, STYX_PORT, kafka_url=KAFKA_URL)
+        time.sleep(proc_num * 0.2)
+        styx.open(consume=False)
+        ycsb_generator = transactional_ycsb_generator(key_list, ycsb_operator, N_ENTITIES, zipf_const=ZIPF_CONST)
+        timestamp_futures: dict[bytes, dict] = {}
+        time.sleep(5)
+        barrier.wait()
+        start = timer()
+        for sec in range(seconds):
+            sec_start = timer()
+            for i in range(messages_per_second):
+                if i % (messages_per_second // sleeps_per_second) == 0:
+                    time.sleep(sleep_time)
+                operator, key, func_name, params = next(ycsb_generator)
+                future = styx.send_event(operator=operator,
+                                         key=key,
+                                         function=func_name,
+                                         params=params)
+                timestamp_futures[future.request_id] = {"op": f'{func_name} {key}->{params[0]}'}
+            styx.flush()
+            sec_end = timer()
+            lps = sec_end - sec_start
+            if lps < 1:
+                time.sleep(1 - lps)
+            sec_end2 = timer()
+            print(f'{sec} | Latency per second: {sec_end2 - sec_start}')
+            if sec == manual_scale_time:
+                styx.submit_manual_scale(N_PARTITIONS + 1)
+                print(f'Manual scale request submitted for: {N_PARTITIONS + 1} partitions')
+        end = timer()
+        print(f'Average latency per second: {(end - start) / seconds}')
 
-    styx.close()
+        styx.close()
 
-    for key, metadata in styx.delivery_timestamps.items():
-        timestamp_futures[key]["timestamp"] = metadata
-    return timestamp_futures
+        for key, metadata in styx.delivery_timestamps.items():
+            timestamp_futures[key]["timestamp"] = metadata
+        return timestamp_futures
+    except Exception as e:
+        # IMPORTANT: multiprocessing.Pool needs return values/exceptions to be pickleable.
+        # confluent_kafka's cimpl.KafkaException is not reliably pickleable, so return a
+        # plain dict with strings instead.
+        return {
+            f"__error__:{proc_num}".encode(): {
+                "proc_num": proc_num,
+                "error_type": type(e).__name__,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
+        }
 
 
 def main():
@@ -153,32 +171,16 @@ def main():
         results = p.map(benchmark_runner, range(threads))
 
     results = {k: v for d in results for k, v in d.items()}
-    #assert len(results) == messages_per_second * seconds * threads
-
-    if run_with_validation:
-        # wait for system to stabilize
-        time.sleep(30)
-
-        styx_client = SyncStyxClient(STYX_HOST, STYX_PORT, kafka_url=KAFKA_URL)
-
-        styx_client.open(consume=False)
-
-        print('Starting Consistency measurement')
-
-        validation_results = {}
-
-        for key in key_list:
-            future = styx_client.send_event(operator=ycsb_operator,
-                                            key=key,
-                                            function="read")
-            validation_results[future.request_id] = {"op": f'read -> {key}'}
-
-        styx_client.close()
-
-        for request_id, metadata in styx_client.delivery_timestamps.items():
-            validation_results[request_id]["timestamp"] = metadata
-
-        assert len(validation_results) == N_ENTITIES
+    error_entries = {k: v for k, v in results.items() if isinstance(k, (bytes, bytearray)) and k.startswith(b"__error__:")}
+    if error_entries:
+        print("One or more benchmark runner processes failed:")
+        for k, v in error_entries.items():
+            print(f"- {k.decode(errors='replace')}: {v.get('error_type')} - {v.get('error')}")
+            tb = v.get("traceback")
+            if tb:
+                print(tb)
+        raise SystemExit(1)
+    assert len(results) == messages_per_second * seconds * threads
 
     pd.DataFrame({"request_id": list(results.keys()),
                   "timestamp": [res["timestamp"] for res in results.values()],
@@ -186,7 +188,7 @@ def main():
                   }).sort_values("timestamp").to_csv(f'{SAVE_DIR}/client_requests.csv', index=False)
 
     print('Workload completed')
-    time.sleep(10)
+    time.sleep(5)
 
 
 if __name__ == "__main__":
@@ -209,6 +211,7 @@ if __name__ == "__main__":
         run_with_validation
     )
 
+    migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
     save_metadata(
         MetadataParams(
             workload="ycsb",
@@ -219,8 +222,11 @@ if __name__ == "__main__":
             messages_per_second=messages_per_second * threads,
             n_keys=N_ENTITIES,
             seconds=seconds,
+            migration_start_time=migration_start_time,
+            migration_end_time=migration_end_time,
             zipf_const=ZIPF_CONST,
             epoch_size=epoch_size,
             warmup_seconds=warmup_seconds,
+            manual_scale_sec=manual_scale_time,
         )
     )

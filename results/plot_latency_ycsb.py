@@ -3,62 +3,137 @@ import matplotlib.pyplot as plt
 import ast
 from matplotlib import rcParams
 
+import json
+from pathlib import Path
+
 rcParams['figure.figsize'] = [14, 5]
 plt.rcParams.update({'font.size': 22})
-warmup_seconds = 30
-
-start_migration_time_ms_epoch  = 1747337077616 - 1000
-end_migration_time_ms_epoch = 1747337108856
 
 
-# Load CSVs
-input_df = pd.read_csv('client_requests.csv')
-output_df = pd.read_csv('output.csv')
+def _load_metadata(
+    run_path: Path,
+    default_warmup_seconds: int = 10,
+) -> tuple[int, int | None, int | None]:
+    meta_path = run_path / "metadata.json"
+    if not meta_path.is_file():
+        return default_warmup_seconds, None, None
 
-# Parse request_id byte strings
-input_df['request_id'] = input_df['request_id'].apply(ast.literal_eval)
-output_df['request_id'] = output_df['request_id'].apply(ast.literal_eval)
+    with meta_path.open("r") as f:
+        metadata = json.load(f)
 
-# Join on request_id
-merged_df = pd.merge(input_df, output_df, on='request_id', suffixes=('_in', '_out'))
+    warmup_seconds = int(metadata.get("warmup_seconds", default_warmup_seconds))
+    start_migration_ms_epoch = metadata.get("migration_start_time", None)
+    end_migration_ms_epoch = metadata.get("migration_end_time", None)
 
-# Compute latency in milliseconds
-merged_df['latency_ms'] = merged_df['timestamp_out'] - merged_df['timestamp_in']
+    return warmup_seconds, start_migration_ms_epoch, end_migration_ms_epoch
 
-# Normalize timestamps to start from 0 seconds
-t0 = merged_df['timestamp_in'].min()
-merged_df['time_since_start_sec'] = (merged_df['timestamp_in'] - t0) / 1000
+def plot_latency(
+    run_path: Path,
+    *,
+    ax: plt.Axes | None = None,
+    interval_size: int = 1,
+    start_migration_ms_epoch: int | None = None,
+    end_migration_ms_epoch: int | None = None,
+    save_path: Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    run_path = Path(run_path)
+    warmup_seconds, start_migration_ms_epoch, end_migration_ms_epoch = _load_metadata(run_path)
 
-end_migration_time = ((end_migration_time_ms_epoch - t0) // 1000) - warmup_seconds
-start_migration_time = ((start_migration_time_ms_epoch - t0) // 1000) - warmup_seconds
+    input_df = pd.read_csv(run_path / "client_requests.csv")
+    output_df = pd.read_csv(run_path / "output.csv")
 
-# Filter to show only 5 seconds onwards
-filtered_df = merged_df[merged_df['time_since_start_sec'] >= warmup_seconds].sort_values(by='time_since_start_sec')
+    # Parse request_id byte strings
+    input_df["request_id"] = input_df["request_id"].apply(ast.literal_eval)
+    output_df["request_id"] = output_df["request_id"].apply(ast.literal_eval)
 
-# Define interval size in seconds
-interval_size = 1
+    # Join on request_id
+    merged_df = pd.merge(input_df, output_df, on="request_id", suffixes=("_in", "_out"))
 
-# Floor the time to the nearest interval
-filtered_df['time_bucket'] = (filtered_df['time_since_start_sec'] // interval_size) * interval_size
+    # Compute latency in milliseconds
+    merged_df["latency_ms"] = merged_df["timestamp_out"] - merged_df["timestamp_in"]
 
-# Compute mean latency per bucket
-mean_latency_df = filtered_df.groupby('time_bucket')['latency_ms'].mean().reset_index()
+    # Normalize timestamps to start from 0 seconds
+    t0 = merged_df["timestamp_in"].min()
+    merged_df["time_since_start_sec"] = (merged_df["timestamp_in"] - t0) / 1000
 
-# Shift x-axis to start from 0 after warmup
-mean_latency_df['time_bucket_shifted'] = mean_latency_df['time_bucket'] - warmup_seconds
+    # Filter to show only warmup onwards
+    filtered_df = merged_df[
+        merged_df["time_since_start_sec"] >= warmup_seconds
+    ].sort_values(by="time_since_start_sec")
 
-# Plot mean latency
-plt.plot(mean_latency_df['time_bucket_shifted'], mean_latency_df['latency_ms'], label='Mean Latency', linewidth=3)
-plt.axvline(x=start_migration_time, color='red', linestyle='--', label='Start Migration', linewidth=3)
-plt.text(start_migration_time - 3, -5, f'{start_migration_time}s', color='red', fontsize=20, ha='center', va='top')
-plt.axvline(x=end_migration_time, color='green', linestyle='--', label='End Migration', linewidth=3)
-plt.text(end_migration_time + 3, -5, f'{end_migration_time}s', color='green', fontsize=20, ha='center', va='top')
-plt.xlabel('Time (s)')
-plt.grid(linestyle="dotted", linewidth=1.5, axis="y")
-plt.ylabel('Latency (ms)')
-plt.legend()
-plt.ylim([0, 12000])
-plt.xlim([0, 120])
-plt.tight_layout()
-plt.savefig("latency_ycsb.pdf")
-plt.show()
+    # Floor the time to the nearest interval
+    filtered_df["time_bucket"] = (
+        filtered_df["time_since_start_sec"] // interval_size
+    ) * interval_size
+
+    # Compute mean latency per bucket
+    mean_latency_df = (
+        filtered_df.groupby("time_bucket")["latency_ms"].mean().reset_index()
+    )
+
+    # Shift x-axis to start from 0 after warmup
+    mean_latency_df["time_bucket_shifted"] = (
+        mean_latency_df["time_bucket"] - warmup_seconds
+    )
+
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+
+    # Plot mean latency
+    ax.plot(
+        mean_latency_df["time_bucket_shifted"],
+        mean_latency_df["latency_ms"],
+        label="Mean Latency",
+        linewidth=3,
+    )
+
+    if start_migration_ms_epoch is not None and end_migration_ms_epoch is not None:
+        start_migration_time = ((start_migration_ms_epoch - t0) // 1000) - warmup_seconds
+        end_migration_time = ((end_migration_ms_epoch - t0) // 1000) - warmup_seconds
+        ax.axvline(
+            x=start_migration_time,
+            color="red",
+            linestyle="--",
+            label="Start Migration",
+            linewidth=3,
+        )
+        ax.text(
+            start_migration_time - 3,
+            -5,
+            f"{start_migration_time}s",
+            color="red",
+            fontsize=20,
+            ha="center",
+            va="top",
+        )
+        ax.axvline(
+            x=end_migration_time,
+            color="green",
+            linestyle="--",
+            label="End Migration",
+            linewidth=3,
+        )
+        ax.text(
+            end_migration_time + 3,
+            -5,
+            f"{end_migration_time}s",
+            color="green",
+            fontsize=20,
+            ha="center",
+            va="top",
+        )
+
+    ax.set_xlabel("Time (s)")
+    ax.grid(linestyle="dotted", linewidth=1.5, axis="y")
+    ax.set_ylabel("Latency (ms)")
+    ax.legend()
+
+    if save_path is not None:
+        fig.savefig(save_path)
+    if show:
+        plt.show()
+
+    return fig, ax

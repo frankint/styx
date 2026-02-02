@@ -13,6 +13,7 @@ import uvloop
 from minio import Minio
 import minio.error
 from prometheus_client import start_http_server, Gauge, Counter
+from copy import deepcopy
 
 from styx.common.logging import logging
 from styx.common.message_types import MessageType
@@ -161,6 +162,14 @@ class CoordinatorService(object):
                                             "Average operator call latency in ms for this epoch",
                                             ["instance", "operator", "partition"])
 
+        self.migration_start_time = Gauge("migration_start_time_ms",
+                                          "Timestamp when the migration started",
+                                          [])
+
+        self.migration_end_time = Gauge("migration_end_time_ms",
+                                        "Timestamp when the migration completed",
+                                        [])
+
         self.migration_in_progress: bool = False
 
         self.networking_locks: dict[MessageType, asyncio.Lock] = {
@@ -169,6 +178,7 @@ class CoordinatorService(object):
             MessageType.MigrationDone: asyncio.Lock(),
             MessageType.MigrationInitDone: asyncio.Lock(),
             MessageType.RegisterWorker: asyncio.Lock(),
+            MessageType.ManualScale: asyncio.Lock(),
             MessageType.SnapID: asyncio.Lock(),
             MessageType.Heartbeat: asyncio.Lock(),
             MessageType.AriaProcessingDone: asyncio.Lock(),
@@ -220,10 +230,10 @@ class CoordinatorService(object):
                             self.aria_metadata.stop_in_next_epoch()
                         # Start the InitMigration phase
                         logging.warning(f"MIGRATION | START {graph}")
-                        await self.coordinator.update_stateflow_graph(graph)
                         self.migration_metadata = MigrationMetadata(
                             len(self.coordinator.worker_pool.get_participating_workers())
                         )
+                        await self.coordinator.update_stateflow_graph(graph)
                     elif not self.coordinator.graph_submitted:
                         await self.coordinator.submit_stateflow_graph(graph)
                         self.aria_metadata = AriaSyncMetadata(
@@ -233,9 +243,19 @@ class CoordinatorService(object):
                         logging.warning("Another migration request is currently in progress!")
                         return
                     logging.info("Submitted Stateflow Graph to Workers")
+            case MessageType.ManualScale:
+                async with self.networking_locks[message_type]:
+                    (new_n_partitions,) = self.networking.decode_message(data)
+                    await self._handle_manual_scale(int(new_n_partitions))
             case MessageType.MigrationRepartitioningDone:
                 async with self.networking_locks[message_type]:
                     (epoch_counter, t_counter, input_offsets, output_offsets) = self.networking.decode_message(data)
+                    logging.warning(f"""MIGRATION REPARTITIONING DONE RECEIVED 
+                        | Epoch: {epoch_counter} 
+                        | T_Counter: {t_counter} 
+                        | Input Offsets: {input_offsets} 
+                        | Output Offsets: {output_offsets}
+                    """)
                     sync_complete: bool = await self.migration_metadata.repartitioning_done(
                         epoch_counter,
                         t_counter,
@@ -312,6 +332,57 @@ class CoordinatorService(object):
             case _:
                 # Any other message type
                 logging.error(f"COORDINATOR SERVER: Non supported message type: {message_type}")
+
+    async def _handle_manual_scale(self, new_n_partitions: int) -> None:
+        if self.migration_in_progress:
+            logging.warning("ManualScale requested but a migration is already in progress.")
+            return
+        if not self.coordinator.graph_submitted or self.coordinator.submitted_graph is None:
+            logging.warning("ManualScale requested but no graph is currently submitted.")
+            return
+
+        if new_n_partitions <= 0:
+            logging.warning(f"ManualScale requested with invalid new_n_partitions={new_n_partitions}")
+            return
+
+        max_parallelism = 10 #int(os.getenv("MAX_OPERATOR_PARALLELISM", 10))
+        if new_n_partitions > max_parallelism:
+            logging.warning(
+                f"ManualScale requested with new_n_partitions={new_n_partitions} "
+                f"but MAX_OPERATOR_PARALLELISM={max_parallelism}"
+            )
+            return
+
+        # 1) Build an updated graph (same topology, updated partition count)
+        new_graph = deepcopy(self.coordinator.submitted_graph)
+        for _op_name, op in iter(new_graph):
+            # Scale all operators uniformly for now (fits YCSB demo; can be extended per-operator later)
+            if hasattr(op, "set_n_partitions"):
+                op.set_n_partitions(new_n_partitions)
+            else:
+                op.n_partitions = new_n_partitions
+
+        # 2) Gracefully stop the transactional protocol in the next epoch
+        self.migration_in_progress = True
+        await self.stop_snapshotting()
+        if self.aria_metadata is not None:
+            self.aria_metadata.stop_in_next_epoch()
+
+        # 3) Recompute assignments so standby/new workers become participating
+        self.coordinator.reschedule_all_partitions_round_robin(new_graph)
+
+        # 4) Kick off the existing migration pipeline (state repartition + transfer + resume)
+        self.migration_metadata = MigrationMetadata(
+            len(self.coordinator.worker_pool.get_participating_workers())
+        )
+        logging.warning(
+            f"MANUAL_SCALE | starting migration | new_n_partitions={new_n_partitions} "
+            f"workers_live={len(self.coordinator.worker_pool.get_live_workers())} "
+            f"workers_participating={len(self.coordinator.worker_pool.get_participating_workers())}"
+            f"new graph={new_graph}"
+        )
+        await self.coordinator.update_stateflow_graph(new_graph)
+        self.migration_start_time.set(time.time_ns() // 1_000_000)
 
     async def protocol_controller(self, data):
         message_type: MessageType = self.protocol_networking.get_msg_type(data)
@@ -397,7 +468,7 @@ class CoordinatorService(object):
                     self.empty_epoch_gauge.labels(instance=worker_id).set(1 if empty_epoch else 0)
                     self.utilization_gauge.labels(instance=worker_id).set(utilization)
                     # Operator-level metrics for this worker and epoch
-                    print(f"Worker {worker_id}, received operator epoch stats: {operator_epoch_stats}")
+                    #print(f"Worker {worker_id}, received operator epoch stats: {operator_epoch_stats}")
                     for op_name, partition, tps, avg_latency_ms, call_count in operator_epoch_stats:
                         labels = {
                             "instance": worker_id,
@@ -408,7 +479,6 @@ class CoordinatorService(object):
                         self.operator_call_count_gauge.labels(**labels).set(call_count)
                         self.operator_latency_gauge.labels(**labels).set(avg_latency_ms)
 
-                    # Optional per-phase resource attribution (newer workers append this payload).
                     if phase_resources:
                         cpu_ns = phase_resources.get("cpu_ns", {})
                         rx_bytes = phase_resources.get("rx_bytes", {})
@@ -423,18 +493,17 @@ class CoordinatorService(object):
                         for phase, v in rss_max_bytes.items():
                             self.phase_rss_max_mb.labels(instance=worker_id, phase=phase).set(float(v) / (1024 * 1024))
                     
-                sync_complete: bool = self.aria_metadata.set_empty_sync_done(worker_id)
-                if sync_complete:   
-                    await self.finalize_worker_sync(
+                    sync_complete: bool = self.aria_metadata.set_empty_sync_done(worker_id)
+                    if sync_complete:   
+                        await self.finalize_worker_sync(
                             MessageType(message_type),
                             (self.aria_metadata.stop_next_epoch,),
                             Serializer.MSGPACK
                         )
-                    self.aria_metadata.cleanup(epoch_end=True)
+                        self.aria_metadata.cleanup(epoch_end=True)
             case MessageType.DeterministicReordering:
                 async with self.networking_locks[message_type]:
-                    message = self.protocol_networking.decode_message(data)
-                    worker_id, remote_read_reservation, remote_write_set, remote_read_set = message
+                    (worker_id, remote_read_reservation, remote_write_set, remote_read_set) = self.protocol_networking.decode_message(data)
                     sync_complete: bool = self.aria_metadata.set_deterministic_reordering_done(
                         worker_id,
                         remote_read_reservation,
@@ -455,6 +524,7 @@ class CoordinatorService(object):
                     sync_complete: bool = await self.migration_metadata.set_empty_sync_done(message_type)
                     logging.warning(f"MIGRATION | MigrationDone | {self.migration_metadata.sync_sum}")
                     if sync_complete:
+                        self.migration_end_time.set(time.time_ns() // 1_000_000)
                         logging.warning(f"MIGRATION_FINISHED at time: {time.time_ns() // 1_000_000}")
                         await self.migration_metadata.cleanup(message_type)
                         self.migration_in_progress = False
@@ -515,7 +585,8 @@ class CoordinatorService(object):
     async def finalize_migration_repartition(self):
         async with asyncio.TaskGroup() as tg:
             for worker in self.coordinator.worker_pool.get_participating_workers():
-                tg.create_task(self.protocol_networking.send_message(
+                logging.warning(f"Sending MigrationRepartitioningDone to : {worker}")
+                tg.create_task(self.networking.send_message(
                     worker.worker_ip, worker.worker_port,
                     msg=(self.migration_metadata.epoch_counter,
                          self.migration_metadata.t_counter,
@@ -529,7 +600,7 @@ class CoordinatorService(object):
         async with asyncio.TaskGroup() as tg:
             for worker in self.coordinator.worker_pool.get_participating_workers():
                 logging.warning(f"Sending MigrationDone to : {worker}")
-                tg.create_task(self.protocol_networking.send_message(
+                tg.create_task(self.networking.send_message(
                     worker.worker_ip, worker.worker_port,
                     msg=b'',
                     msg_type=MessageType.MigrationDone,
