@@ -1,8 +1,7 @@
-import pandas as pd
-import matplotlib.pyplot as plt
 import ast
 from matplotlib import rcParams
-
+import matplotlib.pyplot as plt
+import pandas as pd
 import json
 from pathlib import Path
 

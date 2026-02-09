@@ -1,17 +1,13 @@
+#!/usr/bin/env python3
+
+import multiprocessing as mp
 import os
-import multiprocessing
 
 import uvloop
 
 from worker.worker_service import Worker
 
-
-N_THREADS = int(os.getenv('WORKER_THREADS', 1))
-DEBUGPY_ENABLED: bool = os.getenv("STYX_DEBUGPY", "0").lower() in ("1", "true", "yes", "y")
-DEBUGPY_HOST: str = os.getenv("STYX_DEBUGPY_HOST", "0.0.0.0")
-# When WORKER_THREADS>1, each subprocess listens on BASE_PORT + thread_idx
-DEBUGPY_BASE_PORT: int = int(os.getenv("STYX_DEBUGPY_BASE_PORT", "5678"))
-DEBUGPY_WAIT: bool = os.getenv("STYX_DEBUGPY_WAIT", "1").lower() in ("1", "true", "yes", "y")
+N_THREADS = int(os.getenv("WORKER_THREADS", "1"))
 
 WORKER_STANBY: bool = os.getenv("WORKER_STANBY", "false").lower() == "true"
 
@@ -19,44 +15,25 @@ class BootStyx(object):
 
     def __init__(self):
         self.standby = WORKER_STANBY
-        self.worker_threads_pool: list[multiprocessing.Process] = []
+        self.worker_threads_pool: list[mp.Process] = []
 
     @staticmethod
     def start_worker_thread(thread_idx: int, standby: bool = False):
-        # NOTE: this runs in a separate OS process (multiprocessing.Process).
-        # If you want breakpoints in worker code, you need to start debugpy in *this* process.
-        if DEBUGPY_ENABLED:
-            try:
-                import debugpy  # type: ignore
-                port = DEBUGPY_BASE_PORT + thread_idx
-                debugpy.listen((DEBUGPY_HOST, port))
-                if DEBUGPY_WAIT:
-                    # This will pause startup until you attach from your IDE.
-                    debugpy.wait_for_client()
-                # Optional: break immediately after attach to ensure the debugger is alive.
-                if os.getenv("STYX_DEBUGPY_BREAK_ON_START", "0").lower() in ("1", "true", "yes", "y"):
-                    debugpy.breakpoint()
-            except Exception as e:
-                # Don't crash the worker if debugpy isn't available.
-                # (e.g. image not rebuilt with debugpy installed)
-                print(f"[debugpy] failed to start on thread_idx={thread_idx}: {e}", flush=True)
         worker = Worker(thread_idx)
         uvloop.run(worker.main(standby))
 
-    def main(self):
+    def main(self) -> None:
         for thread_idx in range(N_THREADS):
             self.worker_threads_pool.append(
-                multiprocessing.Process(
-                    target=self.start_worker_thread,
-                    args=(thread_idx, self.standby, )
-                )
+                mp.Process(target=self.start_worker_thread, args=(thread_idx, self.standby,)),
             )
-        for worker_thread in self.worker_threads_pool:
-            worker_thread.start()
-        for worker_thread in self.worker_threads_pool:
-            worker_thread.join()
+        for p in self.worker_threads_pool:
+            p.start()
+        for p in self.worker_threads_pool:
+            p.join()
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     boot = BootStyx()
     boot.main()

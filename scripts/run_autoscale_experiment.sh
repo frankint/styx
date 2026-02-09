@@ -50,5 +50,4 @@ fi
 
 
 #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
-#docker compose stop coordinator worker worker-standby
-docker compose stop coordinator
+docker compose stop coordinator worker worker-standby

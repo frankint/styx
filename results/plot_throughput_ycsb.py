@@ -1,4 +1,3 @@
-import argparse
 import ast
 import json
 from datetime import datetime, timezone
@@ -7,7 +6,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib import rcParams
-
 
 rcParams["figure.figsize"] = [14, 5]
 plt.rcParams.update({"font.size": 22})
