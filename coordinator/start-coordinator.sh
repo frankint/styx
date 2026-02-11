@@ -1,3 +1,3 @@
 #!/bin/sh
 
-python coordinator/coordinator_service.py
+uv run python coordinator/coordinator_service.py

@@ -1,22 +1,22 @@
-FROM python:3.14.2-slim-trixie
+FROM ghcr.io/astral-sh/uv:python3.14-trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r styx && useradd -rm -d /usr/local/styx -g styx styx
+    && groupadd -r styx && useradd -l -rm -d /usr/local/styx -g styx styx
+
+ENV PYTHONPATH="/usr/local/styx"
+ENV UV_LINK_MODE=copy
+WORKDIR /usr/local/styx
 
 USER styx
 
-ENV PATH="/usr/local/styx/.local/bin:${PATH}" \
-    PYTHONPATH="/usr/local/styx"
+COPY --chown=styx:styx coordinator/pyproject.toml coordinator/uv.lock ./
+COPY --chown=styx:styx styx-package /usr/local/styx-package/
 
-COPY --chown=styx:styx coordinator/requirements.txt /var/local/styx/
-COPY --chown=styx:styx styx-package /var/local/styx-package/
-RUN pip install --upgrade pip && \
-    pip install --user -r /var/local/styx/requirements.txt && \
-    pip install --user /var/local/styx-package/
-
-WORKDIR /usr/local/styx
+# Use a cache mount to improve performance across builds
+RUN --mount=type=cache,target=/home/styx/.cache/uv,uid=1000,gid=1000 \
+    uv sync --frozen
 
 COPY --chown=styx:styx coordinator coordinator
 COPY --chown=styx:styx coordinator/start-coordinator.sh /usr/local/bin/

@@ -1,3 +1,3 @@
 #!/bin/sh
 
-python worker/boot_worker.py
+uv run python worker/boot_worker.py

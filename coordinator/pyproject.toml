@@ -1,0 +1,22 @@
+[project]
+name = "coordinator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "cityhash==0.4.10",
+    "cloudpickle==3.1.2",
+    "confluent-kafka==2.13.0",
+    "geopy>=2.4.1",
+    "minio==7.2.20",
+    "msgspec==0.20.0",
+    "prometheus-client==0.24.1",
+    "setuptools==80.10.1",
+    "styx",
+    "uvloop==0.22.1",
+    "zstandard==0.25.0",
+]
+
+[tool.uv.sources]
+styx = { path = "../styx-package" }

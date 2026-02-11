@@ -37,6 +37,9 @@ sleep 5
 docker compose -f docker-compose-minio.yml up -d >/dev/null
 sleep 10
 export STYX_WORKER_THREADS="$threads_per_worker"
+# Enable BuildKit for cache mount support
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
 docker compose build \
     --build-arg epoch_size="$epoch_size" \
     --build-arg max_operator_parallelism="$max_operator_parallelism" \
