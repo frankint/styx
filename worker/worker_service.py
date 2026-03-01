@@ -213,6 +213,8 @@ class Worker:
         operator_partition_keys: list[Any],
         dns: dict[str, dict[int, tuple[str, int, int]]],
         worker_id: int,
+        peers: dict[int, tuple[str, int, int]],
+        worker_ip: str
     ) -> dict[OperatorPartition, set[tuple[Any, int]]]:
         ser_time = 0.0
         wire_time = 0.0
@@ -226,11 +228,14 @@ class Worker:
         # Track rehashing results for debugging
         keys_staying = 0
         keys_moving = defaultdict(int)  # new_partition -> count
-        
+
         for key in operator_partition_keys:
             new_partition: int = partitioner.get_partition_no_cache(key)
             operator_partition = (operator_name, new_partition)
-            if new_partition != previous_partition:
+            destination_ip = dns[operator_name][new_partition][0]
+            #sync_logging.warning(f"Key: {key} | New partition: {new_partition} | previous partition: {previous_partition}")
+            #sync_logging.warning(f"Destination IP: {destination_ip} | Worker IP: {worker_ip}")
+            if new_partition != previous_partition or destination_ip != worker_ip:
                 # If this key is already in the correct partition no need to transfer it
                 new_partitions[operator_partition][key] = (worker_id, previous_partition)
                 keys_to_send[(operator_name, previous_partition)].add((key, new_partition))
@@ -238,12 +243,14 @@ class Worker:
             else:
                 keys_staying += 1
         end_hashing = timer()
-        
+
         # Log rehashing results
-        sync_logging.warning(f"MIGRATION REHASH | Worker {worker_id} | {operator_name}:{previous_partition} | "
-                            f"Total keys: {len(operator_partition_keys)} | "
-                            f"Keys staying: {keys_staying} | "
-                            f"Keys moving: {dict(keys_moving)}")
+        sync_logging.warning(
+            f"MIGRATION REHASH | Worker {worker_id} | {operator_name}:{previous_partition} | "
+            f"Total keys: {len(operator_partition_keys)} | "
+            f"Keys staying: {keys_staying} | "
+            f"Keys moving: {dict(keys_moving)}"
+        )
 
         def upload_partition(msg: bytes, worker_info: tuple[str, int, int]) -> float:
             s_wire = timer()
@@ -257,6 +264,7 @@ class Worker:
             e_wire = timer()
             return e_wire - s_wire
 
+        sync_logging.warning(f"New partitions: {new_partitions}")
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = []
             for n_op, data in new_partitions.items():
@@ -303,11 +311,11 @@ class Worker:
         handler = self._message_handlers.get(msg_type, self._handle_unknown)
         await handler(data, msg_type)
 
-
     # -----------------------
     # Small shared helpers
     # -----------------------
     def _update_peers(self, peers: dict) -> None:
+        self.worker_ip = peers[self.id][0] # used in rehashing
         del peers[self.id]
         self.peers = peers
         self.networking.set_peers(peers)
@@ -408,24 +416,21 @@ class Worker:
             # Ensure barriers are reset for a fresh migration round.
             self.migration_repartitioning_done.clear()
             self.migration_completed.clear()
+            self.final_keys_to_send.clear()
 
             # 1) Wait for the transactional protocol to get stopped gracefully.
             t_stop_start = timer()
-            await self._migration_stop_protocol()
+            if self.function_execution_protocol:
+                await self._migration_stop_protocol()
             t_stop_end = timer()
-            logging.warning(
-                "MIGRATION | Function Execution Protocol Stopped! |"
-                f" @Epoch {self.function_execution_protocol.sequencer.epoch_counter} |"
-                f" took: {t_stop_end - t_stop_start}",
-            )
 
             await self._migration_decode_and_apply_plan(data)
             logging.warning("MIGRATION | ARIA STOPPED")
-            
+
             # 2) Once stopped take the hashes and store stage
             t_repart_start = timer()
             self.local_state.log_state_summary(self.id, context="BEFORE MIGRATION (pre-repartition)")
-            
+
             await self._migration_local_repartition()
 
             # 3) Coordinate: Everyone done with repartitioning
@@ -456,7 +461,7 @@ class Worker:
                 f"Worker: {self.id} | Migration took: {round((end_time - start_time) * 1000, 4)}ms",
             )
         except Exception as e:
-            logging.error(f"Uncaught exception while migrating: {e}")
+            logging.exception("Uncaught exception while migrating")
 
     async def _migration_stop_protocol(self) -> None:
         await self.function_execution_protocol.wait_stopped()
@@ -470,11 +475,15 @@ class Worker:
             peers,
             self.operator_state_backend,
         ) = self.networking.decode_message(data)
-        logging.warning(f"MIGRATION | RECEIVED THE DNS: {self.dns} and the peers: {self.peers} and the new worker operators: {new_worker_operators} and deployed graph: {self.deployed_graph}")
+        logging.warning(
+            f"MIGRATION | RECEIVED THE DNS: {self.dns} and the peers: {peers} "
+            f"and the new worker operators: {new_worker_operators} "
+            f"with keys: {new_worker_operators.keys()}",
+        )
         self._update_peers(peers)
         self.worker_operators = new_worker_operators
         if not isinstance(self.local_state, InMemoryOperatorState):
-                        self.local_state = InMemoryOperatorState(set(new_worker_operators.keys())) 
+            self.local_state = InMemoryOperatorState(set(new_worker_operators.keys()))
         await asyncio.sleep(0)
 
     async def _migration_local_repartition(self) -> None:
@@ -504,16 +513,19 @@ class Worker:
                     ),
                     self.dns,
                     self.id,
+                    self.peers,
+                    self.worker_ip
                 ).add_done_callback(self.repartitioning_callback)
 
         self.completed_repartitioning_event.clear()
         await self.completed_repartitioning_event.wait()
 
-        logging.warning(f"MIGRATION | REPARTITIONING COMPLETE | keys_to_send summary:")
+        self.local_state.add_keys_to_send(self.final_keys_to_send)
+
+        logging.warning("MIGRATION | REPARTITIONING COMPLETE | keys_to_send summary:")
         for op_partition, keys in self.local_state.keys_to_send.items():
             logging.warning(f"  {op_partition}: {len(keys)} keys to send")
 
-        self.local_state.add_keys_to_send(self.final_keys_to_send)
 
     async def _migration_coordinate_repartition_done(self) -> None:
         if self.function_execution_protocol is None:
@@ -548,9 +560,8 @@ class Worker:
 
         # Update snapshot helper
         if self.async_snapshots is None:
-            self.async_snapshots = AsyncSnapshotsMinio(self.id,
-            n_assigned_partitions=len(self.registered_operators))
-        else:  
+            self.async_snapshots = AsyncSnapshotsMinio(self.id, n_assigned_partitions=len(self.registered_operators))
+        else:
             self.async_snapshots.update_n_assigned_partitions(n_assigned_partitions=len(self.registered_operators))
 
         # Snapshot id -1 indicates "migration"
@@ -611,7 +622,7 @@ class Worker:
     ) -> None:
         n_op, payload = self.networking.decode_message(data)
         async with self.networking_locks[msg_type]:
-            logging.warning(f"MIGRATION | ReceiveMigrationHashes | partition {n_op} | {len(data)} keys expected")
+            logging.warning(f"MIGRATION | ReceiveMigrationHashes | partition {n_op} | {payload}")
             self.local_state.add_remote_keys(n_op, payload)
 
     async def _handle_request_remote_key(
@@ -620,6 +631,7 @@ class Worker:
         msg_type: MessageType,
     ) -> None:
         operator_partition, key, old_partition, host, port = self.networking.decode_message(data)
+        logging.warning(f"MIGRATION | RequestRemoteKey | operator_partition: {operator_partition} | key: {key}")
         async with self.networking_locks[msg_type]:
             value = self.local_state.get_key_to_migrate(
                 operator_partition,
@@ -641,8 +653,9 @@ class Worker:
     ) -> None:
         operator_partition, key, value = self.networking.decode_message(data)
         async with self.networking_locks[msg_type]:
-            logging.warning(f"Received ReceiveRemoteKey for {operator_partition} with key {key} and value {value}")
-            if value: self.local_state.set_data_from_migration(operator_partition, key, value)
+            logging.debug(f"Received ReceiveRemoteKey for {operator_partition} with key {key} and value {value}")
+            if value is not None:
+                self.local_state.set_data_from_migration(operator_partition, key, value)
             self.protocol_networking.key_received(operator_partition, key)
 
     async def _handle_migration_repartitioning_done(
@@ -942,13 +955,14 @@ class Worker:
         async with server:
             await server.serve_forever()
 
-    def start_networking_tasks(self):
+    def start_networking_tasks(self) -> None:
         self.networking.start_networking_tasks()
         self.protocol_networking.start_networking_tasks()
 
-    async def register_to_coordinator(self, standby: bool):
+    async def register_to_coordinator(self, standby: bool) -> None:
         self.id = await self.networking.send_message_request_response(
-            DISCOVERY_HOST, DISCOVERY_PORT,
+            DISCOVERY_HOST,
+            DISCOVERY_PORT,
             msg=(self.networking.host_name, self.server_port, self.protocol_port, standby),
             msg_type=MessageType.RegisterWorker,
             serializer=Serializer.MSGPACK,

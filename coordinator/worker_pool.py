@@ -1,9 +1,8 @@
 import asyncio
-import heapq
-import os
-
 from collections import defaultdict, deque
 from dataclasses import dataclass
+import heapq
+import os
 from typing import TYPE_CHECKING
 
 from styx.common.logging import logging
@@ -67,7 +66,7 @@ class WorkerPool:
             live.append(worker)
         return live
 
-    def reset_all_assignments(self):
+    def reset_all_assignments(self) -> None:
         """
         Clears all operator assignments and rebuilds the priority queue.
 
@@ -88,21 +87,19 @@ class WorkerPool:
         for w in live_workers:
             self.put(w)
 
-    def register_worker(self,
-                        worker_ip: str,
-                        worker_port: int,
-                        protocol_port: int,
-                        standby: bool) -> int:
+    def register_worker(self, worker_ip: str, worker_port: int, protocol_port: int, standby: bool) -> int:
         if self.dead_worker_ids:
             worker_id: int = self.dead_worker_ids.pop()
         else:
             worker_id: int = self.worker_counter
             self.worker_counter += 1
-        worker = Worker(worker_id=worker_id,
-                        worker_ip=worker_ip,
-                        worker_port=worker_port,
-                        protocol_port=protocol_port,
-                        assigned_operators={})
+        worker = Worker(
+            worker_id=worker_id,
+            worker_ip=worker_ip,
+            worker_port=worker_port,
+            protocol_port=protocol_port,
+            assigned_operators={},
+        )
         if standby:
             self._standby_queue.append(worker)
             self._standby_worker_ids.add(worker_id)
@@ -110,9 +107,7 @@ class WorkerPool:
             self.put(worker)
         return worker_id
 
-    def register_worker_heartbeat(self,
-                                  worker_id: int,
-                                  heartbeat_time: float):
+    def register_worker_heartbeat(self, worker_id: int, heartbeat_time: float) -> None:
         if not self.is_worker_active(worker_id):
             return
         try:
@@ -224,10 +219,13 @@ class WorkerPool:
         return worker
 
     def is_worker_active(self, worker_id: int) -> bool:
-        return (worker_id not in self._standby_worker_ids and worker_id not in self.dead_worker_ids 
-            and worker_id in self._worker_queue_idx)
+        return (
+            worker_id not in self._standby_worker_ids
+            and worker_id not in self.dead_worker_ids
+            and worker_id in self._worker_queue_idx
+        )
 
-    def number_of_workers(self):
+    def number_of_workers(self) -> int:
         return len(self._queue)
 
     def get_standby_workers(self) -> list[Worker]:

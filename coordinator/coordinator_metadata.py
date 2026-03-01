@@ -241,16 +241,21 @@ class Coordinator:
                 )
         worker_assignments = self.worker_pool.get_worker_assignments()
         logging.warning(f"WORKER ASSIGNMENTS: {worker_assignments}")
-        tasks = [self.networking.send_message(worker.worker_ip, worker.worker_port,
-                                              msg=(new_stateflow_graph,
-                                                  worker_assignments[(worker.worker_ip,
-                                                                       worker.worker_port,
-                                                                       worker.protocol_port)],
-                                                   self.worker_pool.get_operator_partition_locations(),
-                                                   self.worker_pool.get_workers(),
-                                                   new_stateflow_graph.operator_state_backend),
-                                              msg_type=MessageType.InitMigration)
-                 for worker in self.worker_pool.get_participating_workers()]
+        tasks = [
+            self.networking.send_message(
+                worker.worker_ip,
+                worker.worker_port,
+                msg=(
+                    new_stateflow_graph,
+                    worker_assignments[(worker.worker_ip, worker.worker_port, worker.protocol_port)],
+                    self.worker_pool.get_operator_partition_locations(),
+                    self.worker_pool.get_workers(),
+                    new_stateflow_graph.operator_state_backend,
+                ),
+                msg_type=MessageType.InitMigration,
+            )
+            for worker in self.worker_pool.get_participating_workers()
+        ]
         await asyncio.gather(*tasks)
         self.submitted_graph = new_stateflow_graph
         metadata_key = msgpack_serialization(self.submitted_graph.name)
@@ -274,42 +279,30 @@ class Coordinator:
 
         self.worker_pool.reset_all_assignments()
         for operator_name, operator in iter(stateflow_graph):
-            for partition in range(operator.n_partitions):
+            for partition in range(MAX_OPERATOR_PARALLELISM):
                 operator_copy = deepcopy(operator)
+                if partition >= operator.n_partitions:
+                    operator_copy.make_shadow()
                 self.worker_pool.schedule_operator_partition((operator_name, partition), operator_copy)
-        for operator_name, operator in iter(stateflow_graph):
-            for shadow_partition in range(operator.n_partitions, MAX_OPERATOR_PARALLELISM):
-                operator_copy = deepcopy(operator)
-                operator_copy.make_shadow()
-                self.worker_pool.schedule_operator_partition((operator_name, shadow_partition), operator_copy)
 
-
-    async def submit_stateflow_graph(self,
-                                     stateflow_graph: StateflowGraph,
-                                     ingress_type: IngressTypes = IngressTypes.KAFKA) -> None:
+    async def submit_stateflow_graph(
+        self, stateflow_graph: StateflowGraph, ingress_type: IngressTypes = IngressTypes.KAFKA
+    ) -> None:
         if not isinstance(stateflow_graph, StateflowGraph):
             raise NotAStateflowGraphError
         if ingress_type == IngressTypes.KAFKA:
             await self.create_kafka_ingress_topics(stateflow_graph)
         for operator_name, operator in iter(stateflow_graph):
-            for partition in range(operator.n_partitions):
+            for partition in range(MAX_OPERATOR_PARALLELISM):
                 operator_copy = deepcopy(operator)
+                # Also add the shadow partitions n_partitions - max parallelism
+                #if partition >= operator.n_partitions:
+                #    operator_copy.make_shadow()
                 self.worker_pool.schedule_operator_partition(
                     (operator_name, partition),
                     operator_copy,
                 )
-        # Also add the shadow partitions n_partitions - max parallelism
-        for operator_name, operator in iter(stateflow_graph):
-            for shadow_partition in range(
-                operator.n_partitions,
-                MAX_OPERATOR_PARALLELISM,
-            ):
-                operator_copy = deepcopy(operator)
-                operator_copy.make_shadow()
-                self.worker_pool.schedule_operator_partition(
-                    (operator_name, shadow_partition),
-                    operator_copy,
-                )
+
         worker_assignments = self.worker_pool.get_worker_assignments()
         tasks = [
             self.networking.send_message(
@@ -376,7 +369,7 @@ class Coordinator:
                 )
                 await asyncio.sleep(1)
         logging.warning(f"MAX OPERATOR PARALLELISM: {MAX_OPERATOR_PARALLELISM}")
-        
+
         topics = (
             [
                 NewTopic(

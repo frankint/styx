@@ -1,10 +1,8 @@
 import asyncio
-import os
-import time
 import typing
 import uuid
 
-from aiokafka import AIOKafkaConsumer, ConsumerRecord, TopicPartition
+from aiokafka import AIOKafkaConsumer, TopicPartition
 from aiokafka.errors import KafkaConnectionError, UnknownTopicOrPartitionError
 from styx.common.logging import logging
 from styx.common.message_types import MessageType
@@ -14,6 +12,7 @@ from styx.common.serialization import Serializer
 from worker.ingress.base_ingress import BaseIngress
 
 if typing.TYPE_CHECKING:
+    from aiokafka.structs import ConsumerRecord
     from styx.common.base_state import BaseOperatorState
     from styx.common.operator import Operator
     from styx.common.tcp_networking import NetworkingManager
@@ -51,25 +50,25 @@ class StyxKafkaIngress(BaseIngress):
 
         self._ingress_epoch: int | None = None
         self._epoch_stats: dict[str, int] = {
-            "consumed": 0,                 # Kafka ClientMsg records consumed
-            "sequenced": 0,                # Calls enqueued locally
-            "forwarded_wrong_partition": 0 # Forwarded via TCP as WrongPartitionRequest
+            "consumed": 0,  # Kafka ClientMsg records consumed
+            "sequenced": 0,  # Calls enqueued locally
+            "forwarded_wrong_partition": 0,  # Forwarded via TCP as WrongPartitionRequest
         }
 
-
     def log_epoch_stats(self, epoch: int, stats: dict[str, int]) -> None:
-        logging.warning(
+        logging.debug(
             f"INGRESS | epoch={epoch} "
             f"consumed={stats.get('consumed', 0)} "
             f"sequenced={stats.get('sequenced', 0)} "
             f"forwarded_wrong_partition={stats.get('forwarded_wrong_partition', 0)}"
         )
 
-    async def start(self,
-                    topic_partitions: list[TopicPartition],
-                    topic_partition_offsets: dict[OperatorPartition, int]):
-        self.kafka_ingress_task: asyncio.Task = asyncio.create_task(self.start_kafka_consumer(topic_partitions,
-                                                                                              topic_partition_offsets))
+    async def start(
+        self, topic_partitions: list[TopicPartition], topic_partition_offsets: dict[OperatorPartition, int]
+    ) -> None:
+        self.kafka_ingress_task: asyncio.Task = asyncio.create_task(
+            self.start_kafka_consumer(topic_partitions, topic_partition_offsets)
+        )
         await self.started.wait()
 
     async def stop(self) -> None:
@@ -80,7 +79,7 @@ class StyxKafkaIngress(BaseIngress):
             logging.warning("kafka ingress coroutine suts down...")
         await self.kafka_consumer.stop()
 
-    def handle_message_from_kafka(self, msg):
+    def handle_message_from_kafka(self, msg: ConsumerRecord) -> None:
         current_epoch = self.sequencer.epoch_counter
         if current_epoch != self._ingress_epoch:
             self.log_epoch_stats(self._ingress_epoch, self._epoch_stats)
@@ -110,9 +109,10 @@ class StyxKafkaIngress(BaseIngress):
                 # Message received in the correct partition (Normal operation)
                 self.sequencer.sequence(run_func_payload)
                 self._epoch_stats["sequenced"] += 1
-            elif ((true_partition := self.registered_operators[(operator_name, msg.partition)].which_partition(key))
-                  == partition):
-                # logging.debug("Message received in the correct partition, but it was an insert operation")
+            elif (
+                true_partition := self.registered_operators[(operator_name, msg.partition)].which_partition(key)
+            ) == partition:
+                logging.debug(f"Key: {key} received in the correct partition, but it was an insert operation")
                 # Message received in the correct partition, but it was an insert operation (didn't exist in the state)
                 self.sequencer.sequence(run_func_payload)
                 self._epoch_stats["sequenced"] += 1

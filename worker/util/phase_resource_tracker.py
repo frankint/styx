@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections import defaultdict
+from dataclasses import dataclass
 import os
+from pathlib import Path
 import time
 
 import psutil
@@ -24,7 +25,7 @@ def _read_net_bytes() -> tuple[int, int]:
     It's still useful for attributing traffic deltas to phases within a worker process.
     """
     try:
-        with open("/proc/self/net/dev", "r", encoding="utf-8") as f:
+        with Path.open("/proc/self/net/dev", encoding="utf-8") as f:
             lines = f.readlines()[2:]  # skip headers
     except FileNotFoundError:
         return 0, 0
@@ -49,7 +50,7 @@ class PhaseResourceTracker:
     - Network: cumulative RX/TX bytes for the current net namespace (delta attributed to phase)
     """
 
-    def __init__(self, pid: int | None = None):
+    def __init__(self, pid: int | None = None) -> None:
         self._pid = pid if pid is not None else os.getpid()
         self._proc = psutil.Process(self._pid)
         self._starts: dict[str, ResourceSnapshot] = {}
@@ -94,5 +95,3 @@ class PhaseResourceTracker:
             "tx_bytes": dict(self._tx_bytes_total),
             "rss_max_bytes": dict(self._rss_max_bytes),
         }
-
-

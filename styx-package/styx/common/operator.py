@@ -1,14 +1,14 @@
 import asyncio
 import os
+import time
+import traceback
 from typing import TYPE_CHECKING
 
 from setuptools._distutils.util import strtobool
 
-import time
-
-from styx.common.logging import logging
 from styx.common.base_operator import BaseOperator
 from styx.common.exceptions import OperatorDoesNotContainFunctionError
+from styx.common.logging import logging
 from styx.common.message_types import MessageType
 from styx.common.partitioning.hash_partitioner import HashPartitioner
 from styx.common.serialization import Serializer
@@ -93,6 +93,11 @@ class Operator(BaseOperator):
         """dict: A mapping from function names to function classes/types."""
         return self.__functions
 
+    @property
+    def run_func_lock(self) -> asyncio.Lock:
+        """asyncio.Lock: Lock used to serialize function execution and state mutation."""
+        return self.__run_func_lock
+
     async def run_function(
         self,
         key: K,
@@ -103,7 +108,7 @@ class Operator(BaseOperator):
         ack_payload: tuple[str, int, int, str, list[int], int] | None,
         fallback_mode: bool,
         use_fallback_cache: bool,
-        params: tuple,
+        original_params: tuple,
         protocol: BaseTransactionalProtocol,
     ) -> bool:
         """Executes a registered function with given parameters in a distributed execution chain.
@@ -133,7 +138,7 @@ class Operator(BaseOperator):
             use_fallback_cache,
             protocol,
         )
-        params = (f, *tuple(params))
+        params = (f, *tuple(original_params))
         success: bool = True
         start_time = time.time()
         if ack_payload is not None:
@@ -157,7 +162,8 @@ class Operator(BaseOperator):
             if isinstance(resp, Exception):
                 await self._send_chain_abort(str(resp), ack_host, ack_port, ack_id)
                 success = False
-                logging.warning(f"Transaction {t_id} failed because we got an exception: {resp}")
+                tb_str = "".join(traceback.format_exception(type(resp), resp, resp.__traceback__))
+                logging.error(f"Transaction {t_id} failed with exception:\n{tb_str}")
             elif fallback_mode and use_fallback_cache:
                 await self.__send_cache_ack(ack_host, ack_port, ack_id)
             elif n_remote_calls == 0:
@@ -180,7 +186,8 @@ class Operator(BaseOperator):
             if isinstance(resp, Exception):
                 self.__networking.abort_chain(t_id, str(resp))
                 success = False
-                logging.warning(f"Transaction {t_id} failed because we got an exception: {resp}")
+                tb_str = "".join(traceback.format_exception(type(resp), resp, resp.__traceback__))
+                logging.error(f"Transaction {t_id} failed with exception:\n{tb_str}")
             elif resp is not None:
                 resp: str | Exception
                 self.__networking.add_response(t_id, resp)

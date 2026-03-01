@@ -196,7 +196,9 @@ class NetworkingManager(BaseNetworking):
         self.socket_pool_size: int = size
 
         self.peers: dict[int, tuple[str, int, int]] = {}
-        self.wait_remote_key_event: dict[OperatorPartition, dict[K, asyncio.Event]] = {}
+        # Maps operator_partition -> key -> (event, waiter_count)
+        self.wait_remote_key_event: dict[OperatorPartition, dict[K, tuple[asyncio.Event, int]]] = {}
+        self.wait_remote_key_lock: asyncio.Lock = asyncio.Lock()
 
     async def close_all_connections(self) -> None:
         for pool in self.pools.values():
@@ -243,19 +245,25 @@ class NetworkingManager(BaseNetworking):
         worker_id_old_part: tuple[int, int] | None,
     ) -> None:
         operator_partition = (operator_name, partition)
-        if worker_id_old_part is None or (
-            operator_partition in self.wait_remote_key_event and key in self.wait_remote_key_event[operator_partition]
-        ):
-            # If a request for that key is already made don't send it again
+
+        if worker_id_old_part is None:
             return
+
+        async with self.wait_remote_key_lock:
+            if operator_partition in self.wait_remote_key_event and key in self.wait_remote_key_event[operator_partition]:
+                # A request for that key is already in progress, increment waiter count
+                event, count = self.wait_remote_key_event[operator_partition][key]
+                self.wait_remote_key_event[operator_partition][key] = (event, count + 1)
+                return
+
+            # Create new event with waiter count of 1
+            if operator_partition in self.wait_remote_key_event:
+                self.wait_remote_key_event[operator_partition][key] = (asyncio.Event(), 1)
+            else:
+                self.wait_remote_key_event[operator_partition] = {key: (asyncio.Event(), 1)}
 
         worker_id, old_partition = worker_id_old_part
         host, port, _ = self.peers[worker_id]
-
-        if operator_partition in self.wait_remote_key_event:
-            self.wait_remote_key_event[operator_partition][key] = asyncio.Event()
-        else:
-            self.wait_remote_key_event[operator_partition] = {key: asyncio.Event()}
 
         await self.send_message(
             host,
@@ -278,16 +286,43 @@ class NetworkingManager(BaseNetworking):
         key: K,
     ) -> None:
         operator_partition = (operator_name, partition)
-        ev = self.wait_remote_key_event[operator_partition][key]
-        await ev.wait()
-        # (6) cleanup to prevent unbounded growth
-        del self.wait_remote_key_event[operator_partition][key]
-        if not self.wait_remote_key_event[operator_partition]:
-            del self.wait_remote_key_event[operator_partition]
+
+        async with self.wait_remote_key_lock:
+            if operator_partition not in self.wait_remote_key_event:
+                # This shouldn't happen if request_key was called, but handle gracefully
+                logging.error(f"wait_for_remote_key_event: no entry for {operator_partition}, key={key}")
+                return
+            if key not in self.wait_remote_key_event[operator_partition]:
+                logging.warning(f"wait_for_remote_key_event: no key entry for {operator_partition}, key={key}")
+                return
+            event, _ = self.wait_remote_key_event[operator_partition][key]
+
+        await event.wait()
+
+        # Cleanup with reference counting to prevent KeyError
+        async with self.wait_remote_key_lock:
+            if operator_partition not in self.wait_remote_key_event:
+                return
+            if key not in self.wait_remote_key_event[operator_partition]:
+                return
+
+            event, count = self.wait_remote_key_event[operator_partition][key]
+            if count <= 1:
+                # Last waiter, clean up the entry
+                del self.wait_remote_key_event[operator_partition][key]
+                if not self.wait_remote_key_event[operator_partition]:
+                    del self.wait_remote_key_event[operator_partition]
+            else:
+                # Decrement waiter count
+                self.wait_remote_key_event[operator_partition][key] = (event, count - 1)
 
     def key_received(self, operator_partition: OperatorPartition, key: K) -> None:
         operator_partition = tuple(operator_partition)
-        self.wait_remote_key_event[operator_partition][key].set()
+        if operator_partition in self.wait_remote_key_event and key in self.wait_remote_key_event[operator_partition]:
+            logging.debug(f"Event received for {operator_partition} with key {key}")
+            event, _ = self.wait_remote_key_event[operator_partition][key]
+            event.set()
+            logging.debug(f"Event keys left: {self.wait_remote_key_event[operator_partition].keys()}")
 
     async def send_message_request_response(
         self,

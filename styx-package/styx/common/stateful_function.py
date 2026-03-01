@@ -82,12 +82,14 @@ class StatefulFunction(Function):
 
         Returns:
             (result, n_remote_calls, partial_node_count) on success
+            ("WrongPartition", -1, -1) if the key was in local state but now has been sent to a remote worker
             (exception, -1, -1) on failure
         """
         try:
             # 1) Decide whether we need to fetch/migrate the key, while holding the lock briefly.
             need_remote_fetch: bool = False
             remote_info: tuple[int, int] | None = None  # (worker_id, old_partition) shape depends on your state
+            res = None
 
             async with self.__operator_lock:
                 if self.__state.in_remote_keys(
@@ -103,12 +105,13 @@ class StatefulFunction(Function):
 
                     # Your state seems to return something like (worker_id, old_partition)
                     # since you later access remote_info[1] as the old partition.
-                    old_partition = remote_info[1]
+                    old_worker_id, old_partition = remote_info
 
+                    # Need to check if partition worker_id is the same as ours to be local
                     is_local: bool = (
                         self.__operator_name,
                         old_partition,
-                    ) in self.__state.operator_partitions
+                    ) in self.__state.operator_partitions and self.__networking.worker_id == old_worker_id
                     if is_local:
                         # Transfer the key from another partition within the same worker
                         self.__state.migrate_within_the_same_worker(
@@ -125,6 +128,9 @@ class StatefulFunction(Function):
             if need_remote_fetch:
                 if remote_info is None:
                     logging.warning("Remote fetch failed: remote_info is None")
+                #logging.warning(
+                #    f"TID={self.__t_id} waiting for key={self.__key} op={self.__operator_name} part={self.__partition}"
+                #)
                 await self.__networking.request_key(
                     self.__operator_name,
                     self.__partition,
@@ -136,9 +142,13 @@ class StatefulFunction(Function):
                     self.__partition,
                     self.__key,
                 )
-
+                #logging.warning(
+                #    f"TID={self.__t_id} received key={self.__key} op={self.__operator_name} part={self.__partition}"
+                #)
             # 3) Run user logic while holding the operator lock.
+            #logging.warning(f"Running user logic for {self.__operator_name}:{self.__key}")
             async with self.__operator_lock:
+                #logging.warning(f"Running user logic for {self.__operator_name}:{self.__key} with data: {self.__state.data}")
                 res = await self.run(*args)
 
             # 4) Fallback cache short-circuit.
@@ -171,8 +181,19 @@ class StatefulFunction(Function):
                 )
 
         except Exception as e:
+            logging.error(
+                f"Exception in {self.__operator_name}:{self.__key} - "
+                f"Debug state: need_remote_fetch={need_remote_fetch}, "
+                f"remote_info={remote_info}, "
+                f"key={self.__key}, "
+                f"in_remote_keys={self.__state.in_remote_keys(self.__key, self.__operator_name, self.__partition)}, "
+                f"operator_partitions={self.__state.operator_partitions}, "
+                f"state data={self.__state.data}, "
+                f"keys_sent={self.__state.keys_sent}, "
+            )
             return e, -1, -1
         else:
+            #logging.warning(f"Returning result for {self.__operator_name}:{self.__key} with data: {self.__state.data}")
             return res, n_remote_calls, partial_node_count
 
     @property

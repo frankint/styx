@@ -5,6 +5,7 @@ from asyncio import StreamReader, StreamWriter
 from collections.abc import Awaitable, Callable
 import concurrent.futures
 import contextlib
+from copy import deepcopy
 from enum import Enum, auto
 import os
 import socket
@@ -15,16 +16,13 @@ from typing import TYPE_CHECKING
 
 from aria_sync_metadata import AriaSyncMetadata
 from coordinator_metadata import Coordinator
-from sliding_window_metric import SlidingWindowMetric
 from minio import Minio
 import minio.error
-from prometheus_client import start_http_server, Gauge, Counter
-from copy import deepcopy
-from typing import Any, Optional
-
+from prometheus_client import Counter, Gauge, start_http_server
+from sliding_window_metric import SlidingWindowMetric
 from styx.common.logging import logging
-from styx.common.metrics import WorkerEpochStats
 from styx.common.message_types import MessageType
+from styx.common.metrics import WorkerEpochStats
 from styx.common.protocols import Protocols
 from styx.common.serialization import Serializer
 from styx.common.tcp_networking import MessagingMode, NetworkingManager
@@ -120,94 +118,76 @@ class CoordinatorService:
         self.recovery_state: RecoveryState = RecoveryState.IDLE
 
         self.metrics_server = start_http_server(8000)
-        self.cpu_usage_gauge = Gauge("worker_cpu_usage_percent",
-                                     "CPU usage percentage",
-                                     ["instance"])
-        self.memory_usage_gauge = Gauge("worker_memory_usage_mb",
-                                        "Memory usage in MB",
-                                        ["instance"])
-        self.network_rx_gauge = Gauge("worker_network_rx_kb",
-                                      "Network received KB",
-                                      ["instance"])
-        self.network_tx_gauge = Gauge("worker_network_tx_kb",
-                                      "Network transmitted KB",
-                                      ["instance"])
-        self.epoch_latency_gauge = Gauge("worker_epoch_latency_ms",
-                                         "Epoch Latency (ms)",
-                                         ["instance"])
-        self.epoch_throughput_gauge = Gauge("worker_epoch_throughput_tps",
-                                            "Epoch Throughput (transactions per second)",
-                                            ["instance"])
-        self.epoch_abort_gauge = Gauge("worker_abort_percent",
-                                       "Epoch Concurrency Abort percentage",
-                                       ["instance"])
-        self.latency_breakdown_gauge = Gauge("latency_breakdown",
-                                             "Time Spent in different phases within the transactional protocol",
-                                             ["instance", "component"])
-        self.snapshotting_gauge = Gauge("worker_total_snapshotting_time_ms",
-                                        "Snapshotting time (ms)",
-                                        ["instance"])
-        self.heartbeat_gauge = Gauge("time_since_last_heartbeat",
-                                            "Time Since Last Heartbeat",
-                                            ["instance"])
-        self.backpressure_gauge = Gauge("worker_backpressure",
-                                        "Backpressure on the worker",
-                                        ["instance"])
-        self.queue_backlog_gauge = Gauge("queue_backlog",
-                                        "Backlog in the worker queue",
-                                        ["instance"])
-        self.idle_time_ms_gauge = Gauge("idle_time_ms_per_second",
-                                        "Idle time ms per second",
-                                        ["instance"])
-        
+        self.cpu_usage_gauge = Gauge("worker_cpu_usage_percent", "CPU usage percentage", ["instance"])
+        self.memory_usage_gauge = Gauge("worker_memory_usage_mb", "Memory usage in MB", ["instance"])
+        self.network_rx_gauge = Gauge("worker_network_rx_kb", "Network received KB", ["instance"])
+        self.network_tx_gauge = Gauge("worker_network_tx_kb", "Network transmitted KB", ["instance"])
+        self.epoch_latency_gauge = Gauge("worker_epoch_latency_ms", "Epoch Latency (ms)", ["instance"])
+        self.epoch_throughput_gauge = Gauge(
+            "worker_epoch_throughput_tps", "Epoch Throughput (transactions per second)", ["instance"]
+        )
+        self.epoch_abort_gauge = Gauge("worker_abort_percent", "Epoch Concurrency Abort percentage", ["instance"])
+        self.latency_breakdown_gauge = Gauge(
+            "latency_breakdown",
+            "Time Spent in different phases within the transactional protocol",
+            ["instance", "component"],
+        )
+        self.snapshotting_gauge = Gauge("worker_total_snapshotting_time_ms", "Snapshotting time (ms)", ["instance"])
+        self.heartbeat_gauge = Gauge("time_since_last_heartbeat", "Time Since Last Heartbeat", ["instance"])
+        self.backpressure_gauge = Gauge("worker_backpressure", "Backpressure on the worker", ["instance"])
+        self.queue_backlog_gauge = Gauge("queue_backlog", "Backlog in the worker queue", ["instance"])
+        self.idle_time_ms_gauge = Gauge("idle_time_ms_per_second", "Idle time ms per second", ["instance"])
+
         # Transaction count metrics
-        self.epoch_total_txns_counter = Counter("epoch_total_transactions",
-                                                "Total transactions processed (cumulative)",
-                                                ["instance"])
-        self.epoch_committed_txns_counter = Counter("epoch_committed_transactions",
-                                                    "Committed transactions (cumulative)",
-                                                    ["instance"])
-        self.epoch_logic_aborts_counter = Counter("epoch_logic_aborts",
-                                                  "Logic/global aborts (cumulative)",
-                                                  ["instance"])
-        self.epoch_concurrency_aborts_counter = Counter("epoch_concurrency_aborts",
-                                                        "Concurrency aborts (cumulative)",
-                                                        ["instance"])
-        self.epoch_committed_lock_free_counter = Counter("epoch_committed_lock_free",
-                                                         "Transactions committed in lock-free phase (cumulative)",
-                                                         ["instance"])
-        self.epoch_committed_fallback_counter = Counter("epoch_committed_fallback",
-                                                        "Transactions committed in fallback phase (cumulative)",
-                                                        ["instance"])
+        self.epoch_total_txns_counter = Counter(
+            "epoch_total_transactions", "Total transactions processed (cumulative)", ["instance"]
+        )
+        self.epoch_committed_txns_counter = Counter(
+            "epoch_committed_transactions", "Committed transactions (cumulative)", ["instance"]
+        )
+        self.epoch_logic_aborts_counter = Counter(
+            "epoch_logic_aborts", "Logic/global aborts (cumulative)", ["instance"]
+        )
+        self.epoch_concurrency_aborts_counter = Counter(
+            "epoch_concurrency_aborts", "Concurrency aborts (cumulative)", ["instance"]
+        )
+        self.epoch_committed_lock_free_counter = Counter(
+            "epoch_committed_lock_free", "Transactions committed in lock-free phase (cumulative)", ["instance"]
+        )
+        self.epoch_committed_fallback_counter = Counter(
+            "epoch_committed_fallback", "Transactions committed in fallback phase (cumulative)", ["instance"]
+        )
         # Metrics for downscaling policies
-        self.empty_epoch_gauge = Gauge("worker_empty_epoch",
-                                       "1 if epoch had no local work (just sync), 0 otherwise",
-                                       ["instance"])
+        self.empty_epoch_gauge = Gauge(
+            "worker_empty_epoch", "1 if epoch had no local work (just sync), 0 otherwise", ["instance"]
+        )
 
-        self.cpu_utilization_ratio_gauge = Gauge("worker_cpu_utilization",
-                                           "Ratio of CPU work in the epoch",
-                                           ["instance"])
-        self.io_utilization_ratio_gauge = Gauge("worker_io_utilization",
-                                               "Ratio of IO wait time in the epoch",
-                                               ["instance"])
+        self.cpu_utilization_ratio_gauge = Gauge(
+            "worker_cpu_utilization", "Ratio of CPU work in the epoch", ["instance"]
+        )
+        self.io_utilization_ratio_gauge = Gauge(
+            "worker_io_utilization", "Ratio of IO wait time in the epoch", ["instance"]
+        )
         # Operator-level performance metrics
-        self.operator_tps_counter = Counter("operator_tps",
-                                        "Transactions per second per operator partition (cumulative)",
-                                        ["instance", "operator", "partition"])
-        self.operator_call_count_counter = Counter("operator_call_count",
-                                                        "Number of calls to an operator partition (cumulative)",
-                                                        ["instance", "operator", "partition"])
-        self.operator_latency_gauge = Gauge("operator_latency_ms",
-                                            "Average operator call latency in ms for this epoch",
-                                            ["instance", "operator", "partition"])
+        self.operator_tps_counter = Counter(
+            "operator_tps",
+            "Transactions per second per operator partition (cumulative)",
+            ["instance", "operator", "partition"],
+        )
+        self.operator_call_count_counter = Counter(
+            "operator_call_count",
+            "Number of calls to an operator partition (cumulative)",
+            ["instance", "operator", "partition"],
+        )
+        self.operator_latency_gauge = Gauge(
+            "operator_latency_ms",
+            "Average operator call latency in ms for this epoch",
+            ["instance", "operator", "partition"],
+        )
 
-        self.migration_start_time = Gauge("migration_start_time_ms",
-                                          "Timestamp when the migration started",
-                                          [])
+        self.migration_start_time = Gauge("migration_start_time_ms", "Timestamp when the migration started", [])
 
-        self.migration_end_time = Gauge("migration_end_time_ms",
-                                        "Timestamp when the migration completed",
-                                        [])
+        self.migration_end_time = Gauge("migration_end_time_ms", "Timestamp when the migration completed", [])
 
         # Phase-attributed resource metrics (aggregated per epoch in the worker, scraped at coordinator).
         self.phase_cpu_ms_total = Counter(
@@ -274,14 +254,13 @@ class CoordinatorService:
         }
 
         # Scaling policy parameters
-        self.scale_up_cpu_threshold: float = 75.0
+        self.scale_up_cpu_threshold: float = 20.0
         self.scale_cooldown_period: float = 10.0
         self.last_scale_action_time: float = 0.0
-        self.scaled_once: bool = False # TEMPORARY
+        self.scaled_once: bool = False  # TEMPORARY
         self.scale_window_seconds: int = 5
         self.cpu_metric_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
-        
-        
+
     async def scale_up(self, new_n_partitions: int, new_worker_num: int) -> None:
         if self.migration_in_progress:
             logging.warning("ManualScale requested but a migration is already in progress.")
@@ -295,7 +274,7 @@ class CoordinatorService:
             return
 
         # TODO: Decide how to handle this
-        max_parallelism = 10 #int(os.getenv("MAX_OPERATOR_PARALLELISM", 10))
+        max_parallelism = 10  # int(os.getenv("MAX_OPERATOR_PARALLELISM", 10))
         if new_n_partitions > max_parallelism:
             logging.warning(
                 f"ManualScale requested with new_n_partitions={new_n_partitions} "
@@ -324,15 +303,13 @@ class CoordinatorService:
             if worker is None:
                 logging.error("No standby workers available to activate")
                 break
-            logging.warning(f"Activated standby worker: {worker.worker_id}")
+            logging.warning(f"Activated standby worker_id: {worker.worker_id}")
 
         # 4) Recompute assignments so standby/new workers become participating
         self.coordinator.reschedule_all_partitions_round_robin(new_graph)
 
         # 5) Kick off the existing migration pipeline (state repartition + transfer + resume)
-        self.migration_metadata = MigrationMetadata(
-            len(self.coordinator.worker_pool.get_participating_workers())
-        )
+        self.migration_metadata = MigrationMetadata(len(self.coordinator.worker_pool.get_participating_workers()))
         logging.warning(
             f"SCALE_UP | starting migration | new_n_partitions={new_n_partitions} "
             f"workers_live={len(self.coordinator.worker_pool.get_live_workers())} "
@@ -341,7 +318,6 @@ class CoordinatorService:
         )
         await self.coordinator.update_stateflow_graph(new_graph)
         self.migration_start_time.set(time.time_ns() // 1_000_000)
-
 
     async def coordinator_controller(
         self,
@@ -409,13 +385,13 @@ class CoordinatorService:
 
         async with self.networking_locks[mt]:
             epoch_counter, t_counter, input_offsets, output_offsets = self.networking.decode_message(data)
-            logging.warning(f"""MIGRATION REPARTITIONING DONE RECEIVED 
-                        | Epoch: {epoch_counter} 
-                        | T_Counter: {t_counter} 
-                        | Input Offsets: {input_offsets} 
+            logging.warning(f"""MIGRATION REPARTITIONING DONE RECEIVED
+                        | Epoch: {epoch_counter}
+                        | T_Counter: {t_counter}
+                        | Input Offsets: {input_offsets}
                         | Output Offsets: {output_offsets}
                     """)
-                    
+
             sync_complete: bool = await self.migration_metadata.repartitioning_done(
                 epoch_counter,
                 t_counter,
@@ -675,12 +651,19 @@ class CoordinatorService:
                 fallback_time,
                 snap_time,
                 sequencer_backpressure,
-                queue_backlog, idle_time_ms,
-                total_txns, committed_txns, logic_aborts,
-                concurrency_aborts, committed_lock_free,
-                committed_fallback, empty_epoch, 
-                cpu_utilization, io_wait_utilization,
-                operator_epoch_stats, phase_resources,
+                queue_backlog,
+                idle_time_ms,
+                total_txns,
+                committed_txns,
+                logic_aborts,
+                concurrency_aborts,
+                committed_lock_free,
+                committed_fallback,
+                empty_epoch,
+                cpu_utilization,
+                io_wait_utilization,
+                operator_epoch_stats,
+                phase_resources,
             ) = self.protocol_networking.decode_message(data)
 
             worker_epoch_stats = WorkerEpochStats(
@@ -738,18 +721,28 @@ class CoordinatorService:
 
         self.latency_breakdown_gauge.labels(instance=worker_id, component="WAL").set(worker_epoch_stats.wal_time)
         self.latency_breakdown_gauge.labels(instance=worker_id, component="1st Run").set(worker_epoch_stats.func_time)
-        self.latency_breakdown_gauge.labels(instance=worker_id, component="Chain Acks").set(worker_epoch_stats.chain_ack_time)
+        self.latency_breakdown_gauge.labels(instance=worker_id, component="Chain Acks").set(
+            worker_epoch_stats.chain_ack_time
+        )
         self.latency_breakdown_gauge.labels(instance=worker_id, component="SYNC").set(worker_epoch_stats.sync_time)
-        self.latency_breakdown_gauge.labels(instance=worker_id, component="Conflict Resolution").set(worker_epoch_stats.conflict_res_time)
-        self.latency_breakdown_gauge.labels(instance=worker_id, component="Commit time").set(worker_epoch_stats.commit_time)
-        self.latency_breakdown_gauge.labels(instance=worker_id, component="Fallback").set(worker_epoch_stats.fallback_time)
-        self.latency_breakdown_gauge.labels(instance=worker_id, component="Async Snapshot").set(worker_epoch_stats.snap_time)
+        self.latency_breakdown_gauge.labels(instance=worker_id, component="Conflict Resolution").set(
+            worker_epoch_stats.conflict_res_time
+        )
+        self.latency_breakdown_gauge.labels(instance=worker_id, component="Commit time").set(
+            worker_epoch_stats.commit_time
+        )
+        self.latency_breakdown_gauge.labels(instance=worker_id, component="Fallback").set(
+            worker_epoch_stats.fallback_time
+        )
+        self.latency_breakdown_gauge.labels(instance=worker_id, component="Async Snapshot").set(
+            worker_epoch_stats.snap_time
+        )
 
         self.backpressure_gauge.labels(instance=worker_id).set(worker_epoch_stats.sequencer_backpressure)
         self.queue_backlog_gauge.labels(instance=worker_id).set(worker_epoch_stats.queue_backlog)
         self.idle_time_ms_gauge.labels(instance=worker_id).set(worker_epoch_stats.idle_time_ms)
 
-        # Transaction count metrics 
+        # Transaction count metrics
         self.epoch_total_txns_counter.labels(instance=worker_id).inc(worker_epoch_stats.total_txns)
         self.epoch_committed_txns_counter.labels(instance=worker_id).inc(worker_epoch_stats.committed_txns)
         self.epoch_logic_aborts_counter.labels(instance=worker_id).inc(worker_epoch_stats.logic_aborts)
@@ -761,14 +754,10 @@ class CoordinatorService:
         self.empty_epoch_gauge.labels(instance=worker_id).set(1 if worker_epoch_stats.empty_epoch else 0)
         self.cpu_utilization_ratio_gauge.labels(instance=worker_id).set(worker_epoch_stats.cpu_utilization)
         self.io_utilization_ratio_gauge.labels(instance=worker_id).set(worker_epoch_stats.io_wait_utilization)
-        
+
         # Operator-level metrics for this worker and epoch
         for op_name, partition, tps, avg_latency_ms, call_count in worker_epoch_stats.operator_epoch_stats:
-            labels = {
-                "instance": worker_id,
-                "operator": op_name,
-                "partition": str(partition)
-            }
+            labels = {"instance": worker_id, "operator": op_name, "partition": str(partition)}
             self.operator_tps_counter.labels(**labels).inc(tps)
             self.operator_call_count_counter.labels(**labels).inc(call_count)
             self.operator_latency_gauge.labels(**labels).set(avg_latency_ms)
@@ -892,10 +881,13 @@ class CoordinatorService:
                 await server.serve_forever()
 
     async def analyze_scaling_metrics(self, cpu_val: float, worker_id: int) -> None:
-        if (time.time() - self.last_scale_action_time < self.scale_cooldown_period or self.scaled_once 
-                or not self.coordinator.worker_pool.is_worker_active(worker_id)):
+        if (
+            time.time() - self.last_scale_action_time < self.scale_cooldown_period
+            or self.scaled_once
+            or not self.coordinator.worker_pool.is_worker_active(worker_id)
+        ):
             return
-        
+
         logging.warning(f"Analyzing scaling metrics for CPU value: {cpu_val} and worker: {worker_id}")
         self.cpu_metric_window.add(cpu_val)
         avg_cpu = self.cpu_metric_window.average()
@@ -912,26 +904,34 @@ class CoordinatorService:
         async with asyncio.TaskGroup() as tg:
             for worker in self.coordinator.worker_pool.get_participating_workers():
                 logging.warning(f"Sending MigrationRepartitioningDone to : {worker}")
-                tg.create_task(self.networking.send_message(
-                    worker.worker_ip, worker.worker_port,
-                    msg=(self.migration_metadata.epoch_counter,
-                         self.migration_metadata.t_counter,
-                         self.migration_metadata.input_offsets,
-                         self.migration_metadata.output_offsets),
-                    msg_type=MessageType.MigrationRepartitioningDone,
-                    serializer=Serializer.MSGPACK
-                ))
+                tg.create_task(
+                    self.networking.send_message(
+                        worker.worker_ip,
+                        worker.worker_port,
+                        msg=(
+                            self.migration_metadata.epoch_counter,
+                            self.migration_metadata.t_counter,
+                            self.migration_metadata.input_offsets,
+                            self.migration_metadata.output_offsets,
+                        ),
+                        msg_type=MessageType.MigrationRepartitioningDone,
+                        serializer=Serializer.MSGPACK,
+                    )
+                )
 
     async def finalize_migration(self) -> None:
         async with asyncio.TaskGroup() as tg:
             for worker in self.coordinator.worker_pool.get_participating_workers():
                 logging.warning(f"Sending MigrationDone to : {worker}")
-                tg.create_task(self.networking.send_message(
-                    worker.worker_ip, worker.worker_port,
-                    msg=b'',
-                    msg_type=MessageType.MigrationDone,
-                    serializer=Serializer.NONE
-                ))
+                tg.create_task(
+                    self.networking.send_message(
+                        worker.worker_ip,
+                        worker.worker_port,
+                        msg=b"",
+                        msg_type=MessageType.MigrationDone,
+                        serializer=Serializer.NONE,
+                    )
+                )
 
     async def finalize_worker_sync(
         self,

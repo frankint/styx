@@ -11,21 +11,27 @@ N_THREADS = int(os.getenv("WORKER_THREADS", "1"))
 
 WORKER_STANBY: bool = os.getenv("WORKER_STANBY", "false").lower() == "true"
 
-class BootStyx(object):
 
-    def __init__(self):
+class BootStyx:
+    def __init__(self) -> None:
         self.standby = WORKER_STANBY
         self.worker_threads_pool: list[mp.Process] = []
 
     @staticmethod
-    def start_worker_thread(thread_idx: int, standby: bool = False):
+    def start_worker_thread(thread_idx: int, standby: bool = False) -> None:
         worker = Worker(thread_idx)
         uvloop.run(worker.main(standby))
 
     def main(self) -> None:
         for thread_idx in range(N_THREADS):
             self.worker_threads_pool.append(
-                mp.Process(target=self.start_worker_thread, args=(thread_idx, self.standby,)),
+                mp.Process(
+                    target=self.start_worker_thread,
+                    args=(
+                        thread_idx,
+                        self.standby,
+                    ),
+                ),
             )
         for p in self.worker_threads_pool:
             p.start()

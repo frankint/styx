@@ -7,10 +7,9 @@ TS=$(date +"%Y%m%d-%H%M%S")
 export STYX_WORKER_THREADS="$threads_per_worker"
 mkdir -p logs
 
-docker compose logs worker | sort -t '|' -k1,1 -k2,2 > "logs/worker-logs-${TS}.log"
+docker compose logs worker | grep -v '|[[:space:]]*$' > "logs/worker-logs-${TS}.log"
 docker compose logs coordinator > "logs/coordinator-logs-${TS}.log"
-docker compose logs worker-standby | sort -t '|' -k1,1 -k2,2 > "logs/worker-standby-logs-${TS}.log"
-
+docker compose logs worker-standby | grep -v '|[[:space:]]*$' > "logs/worker-standby-logs-${TS}.log"
 
 # DELETE PREVIOUS DEPLOYMENT
 docker compose down --volumes --remove-orphans
