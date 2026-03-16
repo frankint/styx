@@ -12,6 +12,7 @@ threads_per_worker=$4
 enable_compression=$5
 use_composite_keys=$6
 use_fallback_cache=$7
+enable_autoscale=${8:-true}
 minimum_amount_of_workers=1
 
 echo "============== Starting Styx Cluster ================"
@@ -23,6 +24,7 @@ echo "minimum_amount_of_workers: $minimum_amount_of_workers"
 echo "enable_compression: $enable_compression"
 echo "use_composite_keys: $use_composite_keys"
 echo "use_fallback_cache: $use_fallback_cache"
+echo "enable_autoscale: $enable_autoscale"
 # Ceiling division
 threaded_scale_factor=$(( (scale_factor + threads_per_worker - 1) / threads_per_worker ))
 # Enforce minimum
@@ -37,6 +39,7 @@ sleep 5
 docker compose -f docker-compose-minio.yml up -d >/dev/null
 sleep 10
 export STYX_WORKER_THREADS="$threads_per_worker"
+export ENABLE_AUTOSCALE="$enable_autoscale"
 # Enable BuildKit for cache mount support
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1

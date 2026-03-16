@@ -43,7 +43,7 @@ echo "use_fallback_cache: $use_fallback_cache"
 echo "regenerate_tpcc_data: $regenerate_tpcc_data"
 echo "=================================================="
 
-bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$n_part" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache"
+bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$n_part" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "false"
 
 sleep 10
 
@@ -51,10 +51,6 @@ if [[ $workload_name == "ycsbt" ]]; then
     # YCSB-T
     run_with_validation=false
     python demo/demo-ycsb/client.py "$client_threads" "$n_keys" "$n_part" "$zipf_const" "$input_rate" "$total_time" "$saving_dir" "$warmup_seconds" "$run_with_validation" "$epoch_size" "$kill_at"
-elif [[ $workload_name == "inc_ycsbt" ]]; then
-    # Incremental YCSB-T
-    run_with_validation=false
-    python demo/demo-ycsb/inc_client.py "$client_threads" "$n_keys" "$n_part" "$zipf_const" "$input_rate" "$total_time" "$saving_dir" "$warmup_seconds" "$run_with_validation" "$epoch_size" "$kill_at"
 elif [[ $workload_name == "dhr" ]]; then
     # Deathstar Hotel Reservation
     python demo/demo-deathstar-hotel-reservation/pure_kafka_demo.py "$saving_dir" "$client_threads" "$n_part" "$input_rate" "$total_time" "$warmup_seconds" "$epoch_size" "$kill_at"

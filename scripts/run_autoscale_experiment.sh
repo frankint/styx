@@ -36,7 +36,7 @@ echo "use_fallback_cache: $use_fallback_cache"
 echo "regenerate_tpcc_data: $regenerate_tpcc_data"
 echo "=================================================="
 
-bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$(($n_part + 1))" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache"
+bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$(($n_part + 1))" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "true"
 sleep 10
 
 docker compose up --scale worker-standby=1 -d worker-standby >/dev/null

@@ -13,6 +13,7 @@ import struct
 import time
 from timeit import default_timer as timer
 from typing import TYPE_CHECKING
+from setuptools._distutils.util import strtobool
 
 from aria_sync_metadata import AriaSyncMetadata
 from coordinator_metadata import Coordinator
@@ -254,6 +255,7 @@ class CoordinatorService:
         }
 
         # Scaling policy parameters
+        self.enable_autoscale: bool = bool(strtobool(os.getenv("ENABLE_AUTOSCALE", "true")))
         self.scale_up_cpu_threshold: float = 20.0
         self.scale_cooldown_period: float = 10.0
         self.last_scale_action_time: float = 0.0
@@ -525,7 +527,8 @@ class CoordinatorService:
             self.network_rx_gauge.labels(instance=worker_id).set(rx_net)  # KB
             self.network_tx_gauge.labels(instance=worker_id).set(tx_net)  # KB
 
-            await self.analyze_scaling_metrics(cpu_perc, worker_id)
+            if self.enable_autoscale:
+                await self.analyze_scaling_metrics(cpu_perc, worker_id)
 
             heartbeat_rcv_time = timer()
             logging.info(
