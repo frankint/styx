@@ -140,6 +140,7 @@ minio-volume
 backup/
 
 demo/demo-tpc-c/tpcc-generator/tpcc-generator
+demo/demo-tpc-c/data*
 styx.sublime-workspace
 styx.sublime-project
 
@@ -152,5 +153,6 @@ grafana-enterprise-11.5.1.darwin-amd64.tar.gz
 !grafana/*
 grafana_data/
 ycsb_dataset_*
+prometheus-data/
 
 logs

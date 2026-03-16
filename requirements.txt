@@ -32,3 +32,4 @@ mkdocs-material==9.7.1
 pytest==9.0.2
 # make sure to have the same ruff verseion as in .github/workflows/ruff.yml line 30
 ruff==0.15.0
+codecarbon==3.2.3
