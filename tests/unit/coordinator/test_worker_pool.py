@@ -81,26 +81,26 @@ class TestWorker:
 class TestWorkerPoolRegistration:
     def test_first_worker_gets_id_1(self):
         pool = WorkerPool()
-        wid = pool.register_worker("127.0.0.1", 5000, 6000)
+        wid = pool.register_worker("127.0.0.1", 5000, 6000, False)
         assert wid == 1
 
     def test_sequential_ids(self):
         pool = WorkerPool()
-        ids = [pool.register_worker("127.0.0.1", 5000 + i, 6000 + i) for i in range(4)]
+        ids = [pool.register_worker("127.0.0.1", 5000 + i, 6000 + i, False) for i in range(4)]
         assert ids == [1, 2, 3, 4]
 
     def test_dead_id_is_reused(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)  # id=1
-        pool.register_worker("127.0.0.1", 5001, 6001)  # id=2
+        pool.register_worker("127.0.0.1", 5000, 6000, False)  # id=1
+        pool.register_worker("127.0.0.1", 5001, 6001, False)  # id=2
         pool.remove_worker(1)
         pool.dead_worker_ids.append(1)
-        new_id = pool.register_worker("127.0.0.1", 5002, 6002)
+        new_id = pool.register_worker("127.0.0.1", 5002, 6002, False)
         assert new_id == 1
 
     def test_register_worker_is_returned_from_peek(self):
         pool = WorkerPool()
-        wid = pool.register_worker("10.0.0.1", 5000, 6000)
+        wid = pool.register_worker("10.0.0.1", 5000, 6000, False)
         w = pool.peek(wid)
         assert w.worker_ip == "10.0.0.1"
         assert w.worker_port == 5000
@@ -136,7 +136,7 @@ class TestWorkerPoolHeap:
 
     def test_peek_returns_worker_without_removing(self):
         pool = WorkerPool()
-        wid = pool.register_worker("127.0.0.1", 5000, 6000)
+        wid = pool.register_worker("127.0.0.1", 5000, 6000, False)
         w = pool.peek(wid)
         assert w.worker_id == wid
         # worker is still in the pool
@@ -170,8 +170,8 @@ class TestWorkerPoolHeap:
 class TestWorkerPoolScheduling:
     def test_schedule_assigns_to_least_loaded_worker(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)  # w1
-        pool.register_worker("127.0.0.1", 5001, 6001)  # w2
+        pool.register_worker("127.0.0.1", 5000, 6000, False)  # w1
+        pool.register_worker("127.0.0.1", 5001, 6001, False)  # w2
 
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
@@ -187,14 +187,14 @@ class TestWorkerPoolScheduling:
 
     def test_schedule_records_operator_partition_to_worker_mapping(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
         assert ("users", 0) in pool.operator_partition_to_worker
 
     def test_remove_operator_partition_updates_worker(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
         pool.remove_operator_partition(("users", 0))
@@ -204,7 +204,7 @@ class TestWorkerPoolScheduling:
 
     def test_update_operator_replaces_operator_in_place(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         op_old = _mock_operator()
         op_new = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op_old)
@@ -221,16 +221,16 @@ class TestWorkerPoolScheduling:
 class TestWorkerPoolQueries:
     def test_number_of_workers_counts_including_tombstones(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
-        pool.register_worker("127.0.0.1", 5001, 6001)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
+        pool.register_worker("127.0.0.1", 5001, 6001, False)
         pool.remove_worker(1)
         # raw queue still has the entry; number_of_workers counts the raw list
         assert pool.number_of_workers() == 2
 
     def test_get_standby_workers(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)  # no operators → standby
-        pool.register_worker("127.0.0.1", 5001, 6001)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)  # no operators → standby
+        pool.register_worker("127.0.0.1", 5001, 6001, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)  # w1 gets it
         standby = pool.get_standby_workers()
@@ -238,8 +238,8 @@ class TestWorkerPoolQueries:
 
     def test_get_participating_workers(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
-        pool.register_worker("127.0.0.1", 5001, 6001)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
+        pool.register_worker("127.0.0.1", 5001, 6001, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
         participating = pool.get_participating_workers()
@@ -248,8 +248,8 @@ class TestWorkerPoolQueries:
 
     def test_get_workers_returns_dict_of_addresses(self):
         pool = WorkerPool()
-        pool.register_worker("10.0.0.1", 5000, 6000)
-        pool.register_worker("10.0.0.2", 5001, 6001)
+        pool.register_worker("10.0.0.1", 5000, 6000, False)
+        pool.register_worker("10.0.0.2", 5001, 6001, False)
         workers = pool.get_workers()
         assert 1 in workers
         assert 2 in workers
@@ -258,8 +258,8 @@ class TestWorkerPoolQueries:
 
     def test_get_workers_excludes_tombstones(self):
         pool = WorkerPool()
-        pool.register_worker("10.0.0.1", 5000, 6000)
-        pool.register_worker("10.0.0.2", 5001, 6001)
+        pool.register_worker("10.0.0.1", 5000, 6000, False)
+        pool.register_worker("10.0.0.2", 5001, 6001, False)
         pool.remove_worker(1)
         workers = pool.get_workers()
         assert 1 not in workers
@@ -267,7 +267,7 @@ class TestWorkerPoolQueries:
 
     def test_get_worker_assignments(self):
         pool = WorkerPool()
-        pool.register_worker("10.0.0.1", 5000, 6000)
+        pool.register_worker("10.0.0.1", 5000, 6000, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
         assignments = pool.get_worker_assignments()
@@ -277,7 +277,7 @@ class TestWorkerPoolQueries:
 
     def test_get_operator_partition_locations(self):
         pool = WorkerPool()
-        pool.register_worker("10.0.0.1", 5000, 6000)
+        pool.register_worker("10.0.0.1", 5000, 6000, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
         locations = pool.get_operator_partition_locations()
@@ -294,7 +294,7 @@ class TestWorkerPoolQueries:
 class TestWorkerPoolHeartbeats:
     def test_healthy_worker_not_in_failed_set(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         now = time.time()
         pool.register_worker_heartbeat(1, now)
         failed, _ = _run_sync_in_loop(pool.check_heartbeats, now + 1.0)  # 1 second later → 1000ms < 5000ms
@@ -302,7 +302,7 @@ class TestWorkerPoolHeartbeats:
 
     def test_stale_worker_detected_as_failed(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)  # make it participating
         now = time.time()
@@ -313,7 +313,7 @@ class TestWorkerPoolHeartbeats:
     def test_stale_non_participating_worker_not_in_failed_set(self):
         """A worker with no operators that misses heartbeats is removed but not in 'failed'."""
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)  # no operators assigned
+        pool.register_worker("127.0.0.1", 5000, 6000, False)  # no operators assigned
         now = time.time()
         pool.register_worker_heartbeat(1, now)
         failed, _ = _run_sync_in_loop(pool.check_heartbeats, now + 10.0)
@@ -321,7 +321,7 @@ class TestWorkerPoolHeartbeats:
 
     def test_heartbeats_per_worker_populated(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         now = time.time()
         pool.register_worker_heartbeat(1, now)
         _, heartbeats = _run_sync_in_loop(pool.check_heartbeats, now + 1.0)
@@ -334,7 +334,7 @@ class TestWorkerPoolHeartbeats:
 
     def test_dead_worker_id_appended_on_failure(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
         now = time.time()
@@ -344,7 +344,7 @@ class TestWorkerPoolHeartbeats:
 
     def test_orphaned_operators_collected_on_failure(self):
         pool = WorkerPool()
-        pool.register_worker("127.0.0.1", 5000, 6000)
+        pool.register_worker("127.0.0.1", 5000, 6000, False)
         op = _mock_operator()
         pool.schedule_operator_partition(("users", 0), op)
         now = time.time()

@@ -295,7 +295,7 @@ class Coordinator:
             for partition in range(self.max_operator_parallelism):
                 operator_copy = deepcopy(operator)
                 # Also add the shadow partitions n_partitions - max parallelism
-                #if partition >= operator.n_partitions:
+                # if partition >= operator.n_partitions:
                 #    operator_copy.make_shadow()
                 self.worker_pool.schedule_operator_partition(
                     (operator_name, partition),

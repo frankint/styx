@@ -151,7 +151,7 @@ grafana-enterprise-11.5.1.darwin-amd64.tar.gz
 !grafana/*
 grafana_data/
 ycsb_dataset_*
-prometheus-data/
+prometheus-data/*
 
 !charts/grafana/files/grafana/dashboards/server_specific.json
 !charts/grafana/files/grafana/dashboards/styx.json

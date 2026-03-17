@@ -210,13 +210,8 @@ class AriaProtocol(BaseTransactionalProtocol):
         # Per-phase resource attribution (CPU/RSS/RX/TX deltas), aggregated per epoch.
         self.phase_resource_tracker = PhaseResourceTracker()
 
-
-    def record_operator_call(self,
-        operator_name: str,
-        partition: int,
-        function_name: str,
-        duration_ms: float,
-        success: bool
+    def record_operator_call(
+        self, operator_name: str, partition: int, function_name: str, duration_ms: float, success: bool
     ) -> None:
         """
         Record an operator call for metrics tracking.
@@ -331,7 +326,7 @@ class AriaProtocol(BaseTransactionalProtocol):
     async def _handle_run_fun_remote(self, data: bytes) -> None:
         mt = MessageType.RunFunRemote
         async with self.networking_locks[mt]:
-            #logging.debug("CALLED RUN FUN FROM PEER")
+            # logging.debug("CALLED RUN FUN FROM PEER")
             (
                 t_id,
                 request_id,
@@ -380,7 +375,7 @@ class AriaProtocol(BaseTransactionalProtocol):
             ) = self.networking.decode_message(data)
 
             logging.warning(
-                f"Aria WrongPartitionRequest: {key}:{operator_name}:{kafka_ingress_partition} and partition {partition}",
+                f"Aria WrongPartitionRequest: {key}:{operator_name}:{kafka_ingress_partition}, partition: {partition}",
             )
 
             payload = RunFuncPayload(
@@ -495,7 +490,6 @@ class AriaProtocol(BaseTransactionalProtocol):
         async with self.networking_locks[mt]:
             self.local_state.set_batch_data_from_migration(operator_partition, batch)
 
-
     async def _write_to_wal(self, sequence: list[SequencedItem]) -> tuple[float, float]:
         start_wal = timer()
         sequence_to_log = msgpack_serialization(
@@ -563,14 +557,15 @@ class AriaProtocol(BaseTransactionalProtocol):
 
         await self.stop()
 
-    async def _process_epoch(self, sequence: list[SequencedItem]) -> None:
+    # TODO: refactor this function to be more readable
+    async def _process_epoch(self, sequence: list[SequencedItem]) -> None:  # noqa: PLR0915 temporary ignore
         epoch_start = timer()
 
         sequence = await self._redirect_migration_backlog_transactions(sequence)
 
         # Calculate idle time: time spent waiting since last epoch ended
         idle_end = timer()
-        idle_start = self._last_epoch_end_time if self._last_epoch_end_time else idle_end
+        idle_start = self._last_epoch_end_time or idle_end
         self._idle_time_ms = (idle_end - idle_start) * 1000  # Convert to ms
         # Track if this is an empty epoch (no local work, just sync)
         self._empty_epoch = not bool(sequence)
@@ -622,7 +617,7 @@ class AriaProtocol(BaseTransactionalProtocol):
 
         fallback_start = timer()
         self.phase_resource_tracker.begin("Fallback")
-        abort_rate, committed_fallback = await self._maybe_run_fallback()
+        _, committed_fallback = await self._maybe_run_fallback()
         self.phase_resource_tracker.end("Fallback")
         fallback_end = timer()
         logging.debug("Finished fallback")
@@ -740,15 +735,20 @@ class AriaProtocol(BaseTransactionalProtocol):
         await self._sync_cleanup(worker_epoch_stats)
         self._last_epoch_end_time = timer()
 
-    """ When migration happens, the transactions that are in the backlog of the migration need to be redirected to the new partition.
-    If the key is in the set_keys_to_send and the partition is not the same as the new partition, the transaction needs to be redirected
+    """
+    When migration happens, the transactions that are in the backlog of the migration
+    need to be redirected to the new partition. If the key is in the set_keys_to_send
+    and the partition is not the same as the new partition, the transaction needs to be redirected
     to the new partition decided by the previous migration.
     """
+
     async def _redirect_migration_backlog_transactions(self, sequence: list[SequencedItem]) -> list[SequencedItem]:
         sequence_to_process = []
         for seq_item in sequence:
-    
-            if seq_item.payload.key in self.local_state.set_keys_to_send and seq_item.payload.partition != self.local_state.keys_to_workers[seq_item.payload.key]:
+            if (
+                seq_item.payload.key in self.local_state.set_keys_to_send
+                and seq_item.payload.partition != self.local_state.keys_to_workers[seq_item.payload.key]
+            ):
                 new_partition = self.local_state.keys_to_workers[seq_item.payload.key]
                 logging.warning(
                     f"Key {seq_item.payload.key} needs redirect: "
@@ -795,7 +795,6 @@ class AriaProtocol(BaseTransactionalProtocol):
             else:
                 sequence_to_process.append(seq_item)
         return sequence_to_process
-
 
     async def _run_epoch_functions_and_chain(
         self,
@@ -1123,7 +1122,7 @@ class AriaProtocol(BaseTransactionalProtocol):
                     collocated_same_t_id_functions=collocated_t_id_functions,
                 ),
             )
-        #logging.warning(f"Remote function calls: {self.networking.remote_function_calls}")
+        # logging.warning(f"Remote function calls: {self.networking.remote_function_calls}")
 
         if USE_FALLBACK_CACHE:
             remote_payloads = [

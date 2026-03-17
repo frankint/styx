@@ -291,7 +291,7 @@ class TestRequestKey:
         nm = _nm()
         nm.send_message = AsyncMock()
         nm.peers = {1: ("10.0.0.2", 5001, 6001)}
-        nm.wait_remote_key_event[("users", 0)] = {"k1": asyncio.Event()}
+        nm.wait_remote_key_event[("users", 0)] = {"k1": (asyncio.Event(), 1)}
 
         await nm.request_key("users", 0, "k1", (1, 5))
         nm.send_message.assert_not_called()
@@ -301,7 +301,7 @@ class TestRequestKey:
         nm = _nm()
         nm.peers = {1: ("10.0.0.2", 5001, 6001)}
         nm.send_message = AsyncMock()
-        nm.wait_remote_key_event[("users", 0)] = {"k_other": asyncio.Event()}
+        nm.wait_remote_key_event[("users", 0)] = {"k_other": (asyncio.Event(), 1)}
 
         await nm.request_key("users", 0, "k_new", (1, 5))
         assert "k_new" in nm.wait_remote_key_event[("users", 0)]
@@ -318,7 +318,7 @@ class TestWaitForRemoteKeyEvent:
     async def test_wait_and_cleanup(self):
         nm = _nm()
         ev = asyncio.Event()
-        nm.wait_remote_key_event[("users", 0)] = {"k1": ev}
+        nm.wait_remote_key_event[("users", 0)] = {"k1": (ev, 1)}
 
         ev.set()
         await nm.wait_for_remote_key_event("users", 0, "k1")
@@ -330,7 +330,7 @@ class TestWaitForRemoteKeyEvent:
         nm = _nm()
         ev1 = asyncio.Event()
         ev2 = asyncio.Event()
-        nm.wait_remote_key_event[("users", 0)] = {"k1": ev1, "k2": ev2}
+        nm.wait_remote_key_event[("users", 0)] = {"k1": (ev1, 1), "k2": (ev2, 1)}
 
         ev1.set()
         await nm.wait_for_remote_key_event("users", 0, "k1")

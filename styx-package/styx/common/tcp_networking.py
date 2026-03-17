@@ -250,7 +250,10 @@ class NetworkingManager(BaseNetworking):
             return
 
         async with self.wait_remote_key_lock:
-            if operator_partition in self.wait_remote_key_event and key in self.wait_remote_key_event[operator_partition]:
+            if (
+                operator_partition in self.wait_remote_key_event
+                and key in self.wait_remote_key_event[operator_partition]
+            ):
                 # A request for that key is already in progress, increment waiter count
                 event, count = self.wait_remote_key_event[operator_partition][key]
                 self.wait_remote_key_event[operator_partition][key] = (event, count + 1)

@@ -13,13 +13,13 @@ import struct
 import time
 from timeit import default_timer as timer
 from typing import TYPE_CHECKING
-from setuptools._distutils.util import strtobool
 
 from aria_sync_metadata import AriaSyncMetadata
 import boto3
 import botocore
 from coordinator_metadata import Coordinator
 from prometheus_client import Counter, Gauge, start_http_server
+from setuptools._distutils.util import strtobool
 from sliding_window_metric import SlidingWindowMetric
 from styx.common.logging import logging
 from styx.common.message_types import MessageType

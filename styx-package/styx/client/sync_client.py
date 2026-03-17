@@ -352,4 +352,3 @@ class SyncStyxClient(BaseStyxClient):
         s.connect((self._styx_coordinator_adr, self._styx_coordinator_port))
         s.send(msg)
         s.close()
-

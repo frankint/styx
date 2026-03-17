@@ -29,7 +29,7 @@ class InMemoryOperatorState(BaseAriaState):
         # (operator_name, old_partition): set of keys with the new partition
         self.keys_to_send: dict[OperatorPartition, set[tuple[K, int]]] = {}
         self.keys_sent: dict[K, int] = {}
-        # Used to efficiently check if a key no longer should be in this worker due to migration 
+        # Used to efficiently check if a key no longer should be in this worker due to migration
         self.set_keys_to_send: set[K] = set()
         self.keys_to_workers: dict[K, int] = {}
 
@@ -38,7 +38,7 @@ class InMemoryOperatorState(BaseAriaState):
         self.set_keys_to_send = set()
         self.keys_to_workers = {}
 
-        for _, key_set in self.keys_to_send.items():
+        for key_set in self.keys_to_send.values():
             for key, new_partition in key_set:
                 self.set_keys_to_send.add(key)
                 self.keys_to_workers[key] = new_partition
@@ -134,7 +134,7 @@ class InMemoryOperatorState(BaseAriaState):
         batch_to_send: dict[OperatorPartition, KVPairs] = defaultdict(dict)
         c = 0
         operator_partitions_to_clear = []
-        logging.warning(f"ASYNC_MIGRATION | Getting async migrate batch with batch size {batch_size} and keys to send: {self.keys_to_send}")
+        logging.warning(f"ASYNC_MIGRATION | Batch size {batch_size}, keys_to_send: {self.keys_to_send}")
         for operator_partition, keys in self.keys_to_send.items():
             operator_name, _ = operator_partition
             while keys and c < batch_size:
@@ -308,7 +308,6 @@ class InMemoryOperatorState(BaseAriaState):
 
     def exists(self, key: K, operator_name: str, partition: int) -> bool:
         operator_partition: OperatorPartition = (operator_name, partition)
-        #logging.warning(f"Checking if key: {key} exists in operator partition: {operator_partition} with data: {self.data} and keys to send: {self.keys_to_send} and remote keys: {self.remote_keys}")
         if operator_partition not in self.data:
             return False
         return (

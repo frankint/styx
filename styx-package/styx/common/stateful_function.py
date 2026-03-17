@@ -128,9 +128,9 @@ class StatefulFunction(Function):
             if need_remote_fetch:
                 if remote_info is None:
                     logging.warning("Remote fetch failed: remote_info is None")
-                #logging.warning(
+                # logging.warning(
                 #    f"TID={self.__t_id} waiting for key={self.__key} op={self.__operator_name} part={self.__partition}"
-                #)
+                # )
                 await self.__networking.request_key(
                     self.__operator_name,
                     self.__partition,
@@ -142,13 +142,12 @@ class StatefulFunction(Function):
                     self.__partition,
                     self.__key,
                 )
-                #logging.warning(
+                # logging.warning(
                 #    f"TID={self.__t_id} received key={self.__key} op={self.__operator_name} part={self.__partition}"
-                #)
+                # )
             # 3) Run user logic while holding the operator lock.
-            #logging.warning(f"Running user logic for {self.__operator_name}:{self.__key}")
+            # logging.warning(f"Running user logic for {self.__operator_name}:{self.__key}")
             async with self.__operator_lock:
-                #logging.warning(f"Running user logic for {self.__operator_name}:{self.__key} with data: {self.__state.data}")
                 res = await self.run(*args)
 
             # 4) Fallback cache short-circuit.
@@ -193,7 +192,7 @@ class StatefulFunction(Function):
             )
             return e, -1, -1
         else:
-            #logging.warning(f"Returning result for {self.__operator_name}:{self.__key} with data: {self.__state.data}")
+            # logging.warning(f"Returning result for {self.__operator_name}:{self.__key} with data: {self.__state.data}")
             return res, n_remote_calls, partial_node_count
 
     @property

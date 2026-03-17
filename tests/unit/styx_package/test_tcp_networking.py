@@ -107,7 +107,7 @@ class TestNetworkingManager:
         with patch("socket.gethostbyname", return_value="10.0.0.1"), patch("socket.gethostname", return_value="worker"):
             nm = NetworkingManager(host_port=6000)
         ev = asyncio.Event()
-        nm.wait_remote_key_event[("op", 0)] = {"key1": ev}
+        nm.wait_remote_key_event[("op", 0)] = {"key1": (ev, 1)}
         nm.key_received(["op", 0], "key1")
         assert ev.is_set()
 

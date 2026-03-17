@@ -66,8 +66,8 @@ class TestStartRecoveryProcess:
     async def test_recovery_removes_workers(self):
         c = _coordinator()
         # Register two workers
-        w1_id, _ = c.register_worker("10.0.0.1", 5000, 6000)
-        w2_id, _ = c.register_worker("10.0.0.2", 5001, 6001)
+        w1_id, _ = c.register_worker("10.0.0.1", 5000, 6000, False)
+        w2_id, _ = c.register_worker("10.0.0.2", 5001, 6001, False)
         c.submitted_graph = _graph()
 
         worker_to_remove = c.get_worker_with_id(w1_id)
@@ -208,8 +208,8 @@ class TestSubmitStateflowGraph:
     async def test_submit_graph_sets_state(self):
         c = _coordinator()
         # Register workers first
-        c.register_worker("10.0.0.1", 5000, 6000)
-        c.register_worker("10.0.0.2", 5001, 6001)
+        c.register_worker("10.0.0.1", 5000, 6000, False)
+        c.register_worker("10.0.0.2", 5001, 6001, False)
         graph = _graph()
         c.kafka_metadata_producer = MagicMock()
         c.kafka_metadata_producer.send_and_wait = AsyncMock()

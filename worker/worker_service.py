@@ -203,8 +203,7 @@ class Worker:
         operator_partition_keys: list[Any],
         dns: dict[str, dict[int, tuple[str, int, int]]],
         worker_id: int,
-        peers: dict[int, tuple[str, int, int]],
-        worker_ip: str
+        worker_ip: str,
     ) -> dict[OperatorPartition, set[tuple[Any, int]]]:
         ser_time = 0.0
         wire_time = 0.0
@@ -223,8 +222,8 @@ class Worker:
             new_partition: int = partitioner.get_partition_no_cache(key)
             operator_partition = (operator_name, new_partition)
             destination_ip = dns[operator_name][new_partition][0]
-            #sync_logging.warning(f"Key: {key} | New partition: {new_partition} | previous partition: {previous_partition}")
-            #sync_logging.warning(f"Destination IP: {destination_ip} | Worker IP: {worker_ip}")
+            # sync_logging.warning(f"Key: {key} | New: {new_partition} | prev: {previous_partition}")
+            # sync_logging.warning(f"Destination IP: {destination_ip} | Worker IP: {worker_ip}")
             if new_partition != previous_partition or destination_ip != worker_ip:
                 # If this key is already in the correct partition no need to transfer it
                 new_partitions[operator_partition][key] = (worker_id, previous_partition)
@@ -236,10 +235,13 @@ class Worker:
 
         # Log rehashing results
         sync_logging.warning(
-            f"MIGRATION REHASH | Worker {worker_id} | {operator_name}:{previous_partition} | "
-            f"Total keys: {len(operator_partition_keys)} | "
-            f"Keys staying: {keys_staying} | "
-            f"Keys moving: {dict(keys_moving)}"
+            "MIGRATION REHASH | Worker %s | %s:%s | Total keys: %s | Keys staying: %s | Keys moving: %s",
+            worker_id,
+            operator_name,
+            previous_partition,
+            len(operator_partition_keys),
+            keys_staying,
+            dict(keys_moving),
         )
 
         def upload_partition(msg: bytes, worker_info: tuple[str, int, int]) -> float:
@@ -254,7 +256,7 @@ class Worker:
             e_wire = timer()
             return e_wire - s_wire
 
-        #sync_logging.warning(f"New partitions: {new_partitions}")
+        # sync_logging.warning(f"New partitions: {new_partitions}")
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = []
             for n_op, data in new_partitions.items():
@@ -305,7 +307,7 @@ class Worker:
     # Small shared helpers
     # -----------------------
     def _update_peers(self, peers: dict) -> None:
-        self.worker_ip = peers[self.id][0] # used in rehashing
+        self.worker_ip = peers[self.id][0]  # used in rehashing
         del peers[self.id]
         self.peers = peers
         self.networking.set_peers(peers)
@@ -415,10 +417,10 @@ class Worker:
             self.final_keys_to_send.clear()
 
             # 1) Wait for the transactional protocol to get stopped gracefully.
-            t_stop_start = timer()
+            # t_stop_start = timer()
             if self.function_execution_protocol:
                 await self._migration_stop_protocol()
-            t_stop_end = timer()
+            # t_stop_end = timer()
 
             await self._migration_decode_and_apply_plan(data)
             logging.warning("MIGRATION | ARIA STOPPED")
@@ -510,7 +512,7 @@ class Worker:
                     self.dns,
                     self.id,
                     self.peers,
-                    self.worker_ip
+                    self.worker_ip,
                 ).add_done_callback(self.repartitioning_callback)
 
         self.completed_repartitioning_event.clear()
@@ -521,7 +523,6 @@ class Worker:
         logging.warning("MIGRATION | REPARTITIONING COMPLETE | keys_to_send summary:")
         for op_partition, keys in self.local_state.keys_to_send.items():
             logging.warning(f"  {op_partition}: {len(keys)} keys to send")
-
 
     async def _migration_coordinate_repartition_done(self) -> None:
         if self.function_execution_protocol is None:

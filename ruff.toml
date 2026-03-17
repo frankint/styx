@@ -58,6 +58,9 @@ ignore = [
 
   # --- In the future we should fix the logging within the project
   "LOG015",
+
+  # --- Allow commented out code
+  "ERA001", 
 ]
 
 fixable = ["ALL"]

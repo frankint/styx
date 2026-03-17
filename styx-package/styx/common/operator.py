@@ -108,7 +108,7 @@ class Operator(BaseOperator):
         ack_payload: tuple[str, int, int, str, list[int], int] | None,
         fallback_mode: bool,
         use_fallback_cache: bool,
-        original_params: tuple,
+        params: tuple,
         protocol: BaseTransactionalProtocol,
     ) -> bool:
         """Executes a registered function with given parameters in a distributed execution chain.
@@ -138,7 +138,7 @@ class Operator(BaseOperator):
             use_fallback_cache,
             protocol,
         )
-        params = (f, *tuple(original_params))
+        params = (f, *tuple(params))
         success: bool = True
         start_time = time.time()
         if ack_payload is not None:

@@ -73,7 +73,7 @@ class TestRegisterWorker:
     def test_new_worker_registered(self):
         async def _test():
             c = _coordinator()
-            worker_id, init_recovery = c.register_worker("10.0.0.1", 5000, 6000)
+            worker_id, init_recovery = c.register_worker("10.0.0.1", 5000, 6000, False)
             assert isinstance(worker_id, int)
             assert init_recovery is False
 
@@ -82,8 +82,8 @@ class TestRegisterWorker:
     def test_same_worker_returns_same_id(self):
         async def _test():
             c = _coordinator()
-            w1, r1 = c.register_worker("10.0.0.1", 5000, 6000)
-            w2, r2 = c.register_worker("10.0.0.1", 5000, 6000)
+            w1, r1 = c.register_worker("10.0.0.1", 5000, 6000, False)
+            w2, r2 = c.register_worker("10.0.0.1", 5000, 6000, False)
             assert w1 == w2
             assert r1 is False
             assert r2 is True  # second registration = recovery
@@ -93,8 +93,8 @@ class TestRegisterWorker:
     def test_different_workers_different_ids(self):
         async def _test():
             c = _coordinator()
-            w1, _ = c.register_worker("10.0.0.1", 5000, 6000)
-            w2, _ = c.register_worker("10.0.0.2", 5001, 6001)
+            w1, _ = c.register_worker("10.0.0.1", 5000, 6000, False)
+            w2, _ = c.register_worker("10.0.0.2", 5001, 6001, False)
             assert w1 != w2
 
         _run(_test())
@@ -102,7 +102,7 @@ class TestRegisterWorker:
     def test_snapshot_id_tracked(self):
         async def _test():
             c = _coordinator()
-            w_id, _ = c.register_worker("10.0.0.1", 5000, 6000)
+            w_id, _ = c.register_worker("10.0.0.1", 5000, 6000, False)
             assert w_id in c.worker_snapshot_ids
 
         _run(_test())
@@ -244,7 +244,7 @@ class TestGetWorkerWithId:
     def test_returns_worker(self):
         async def _test():
             c = _coordinator()
-            w_id, _ = c.register_worker("10.0.0.1", 5000, 6000)
+            w_id, _ = c.register_worker("10.0.0.1", 5000, 6000, False)
             worker = c.get_worker_with_id(w_id)
             assert worker.worker_ip == "10.0.0.1"
             assert worker.worker_port == 5000

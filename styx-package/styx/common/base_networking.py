@@ -165,7 +165,7 @@ class BaseNetworking(ABC):
             logging.error(f"TID: {ack_id} not in ack list!")
 
     def prepare_function_chain(self, t_id: int) -> None:
-        #logging.info(f"New function chain for T_ID: {t_id}")
+        # logging.info(f"New function chain for T_ID: {t_id}")
         self.waited_ack_events[t_id] = asyncio.Event()
         self.ack_fraction[t_id] = fractions.Fraction(0)
         self.ack_cnts[t_id] = (0, 0)

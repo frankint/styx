@@ -5,6 +5,8 @@ through the write-set layer, commit, fallback, migration helpers, and
 snapshot utilities.
 """
 
+import pytest
+
 from worker.operator_state.aria.in_memory_state import InMemoryOperatorState
 
 # ---------------------------------------------------------------------------
@@ -324,7 +326,8 @@ class TestGetAsyncMigrateBatch:
         s.data[OP_PART] = {"k": "v"}
         s.keys_to_send[OP_PART] = {("k", 1)}
         s.get_async_migrate_batch(batch_size=10)
-        assert "k" not in s.data[OP_PART]
+        with pytest.raises(KeyError):
+            _ = s.data[OP_PART]["k"]
 
     def test_exhausted_partition_removed_from_keys_to_send(self):
         s = _state()
@@ -532,8 +535,6 @@ class TestCommitException:
         _put(s, "k", "v", t_id=1)
         # Corrupt write_sets to trigger an exception
         s.write_sets[("nonexistent", 99)] = {2: {"x": "y"}}
-        import pytest
-
         with pytest.raises(KeyError):
             s.commit(aborted_from_remote=set())
 

@@ -31,10 +31,11 @@ def _read_net_bytes() -> tuple[int, int]:
         return 0, 0
 
     rx, tx = 0, 0
+    min_parts = 10
     for line in lines:
         parts = line.split()
         # Format: iface: rx_bytes rx_packets ... tx_bytes tx_packets ...
-        if len(parts) < 10:
+        if len(parts) < min_parts:
             continue
         rx += int(parts[1])
         tx += int(parts[9])
