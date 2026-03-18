@@ -26,7 +26,8 @@ threaded_scale_factor=$(( (scale_factor + threads_per_worker - 1) / threads_per_
 echo "threaded_scale_factor: $threaded_scale_factor"
 echo "====================================================="
 
-docker system prune -f --volumes >/dev/null
+#docker system prune -f --volumes >/dev/null 
+
 # START NEW DEPLOYMENT
 docker compose -f docker-compose-kafka.yml up -d >/dev/null
 sleep 5

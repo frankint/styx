@@ -15,7 +15,7 @@ class WorkerEpochStats:
     commit_time: float
     fallback_time: float
     snap_time: float
-    sequencer_backpressure: float
+    input_rate: float
     queue_backlog: float
     idle_time_ms: float
     total_txns: int

@@ -192,7 +192,6 @@ class StatefulFunction(Function):
             )
             return e, -1, -1
         else:
-            # logging.warning(f"Returning result for {self.__operator_name}:{self.__key} with data: {self.__state.data}")
             return res, n_remote_calls, partial_node_count
 
     @property

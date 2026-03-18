@@ -825,6 +825,101 @@
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
+      "description": "Rate of incoming load across the entire system ",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(rate(input_rate_counter_total[15s]))",
+          "legendFormat": "Total Input Rate",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Input Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
       "description": "Throughput per epoch of the committed transactions",
       "fieldConfig": {
         "defaults": {
@@ -888,9 +983,9 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
+        "h": 5,
+        "w": 6,
+        "x": 6,
         "y": 10
       },
       "id": 5,
@@ -939,7 +1034,7 @@
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
-      "description": "Backpressure - number of input elements that have been consumed by styx but not yet processed\nBacklog - inputs that are in Kafka but aren't consumed by styx yet (cur_styx_offest - kakfa_end_offset)",
+      "description": "Backlog - number of input elements that have been consumed by styx but not yet processed (lag)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -996,9 +1091,9 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
+        "h": 5,
+        "w": 6,
+        "x": 12,
         "y": 10
       },
       "id": 12,
@@ -1027,22 +1122,9 @@
           "range": true,
           "refId": "A",
           "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "sum(worker_backpressure)",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "B"
         }
       ],
-      "title": "Backpressure & Backlog",
+      "title": "Backlog (Lag)",
       "type": "timeseries"
     },
     {
@@ -1107,9 +1189,9 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
+        "h": 5,
+        "w": 6,
+        "x": 18,
         "y": 10
       },
       "id": 14,
@@ -1243,7 +1325,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 16
+        "y": 15
       },
       "id": 13,
       "options": {
@@ -1338,7 +1420,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 16
+        "y": 15
       },
       "id": 17,
       "options": {
@@ -1457,7 +1539,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 16
+        "y": 15
       },
       "id": 6,
       "options": {
@@ -1563,7 +1645,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 24
+        "y": 23
       },
       "id": 19,
       "options": {
@@ -1658,7 +1740,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 24
+        "y": 23
       },
       "id": 20,
       "options": {
@@ -1758,7 +1840,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 24
+        "y": 23
       },
       "id": 21,
       "options": {
@@ -1858,7 +1940,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 32
+        "y": 31
       },
       "id": 9,
       "options": {
@@ -1971,7 +2053,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 32
+        "y": 31
       },
       "id": 7,
       "options": {
@@ -2053,7 +2135,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 32
+        "y": 31
       },
       "id": 18,
       "options": {
@@ -2154,7 +2236,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 32
+        "y": 31
       },
       "id": 16,
       "options": {
@@ -2218,7 +2300,7 @@
         "h": 5,
         "w": 8,
         "x": 0,
-        "y": 36
+        "y": 35
       },
       "id": 11,
       "options": {
@@ -2282,6 +2364,6 @@
   "timezone": "browser",
   "title": "Styx System Overview",
   "uid": "beckc0nxpeupsf",
-  "version": 3,
+  "version": 6,
   "weekStart": ""
 }

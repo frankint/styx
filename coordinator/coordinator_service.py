@@ -143,6 +143,7 @@ class CoordinatorService:
         self.queue_backlog_gauge = Gauge("queue_backlog", "Backlog in the worker queue", ["instance"])
         self.idle_time_ms_gauge = Gauge("idle_time_ms_per_second", "Idle time ms per second", ["instance"])
 
+        self.input_rate_counter = Counter("input_rate_counter", "Input rate", ["instance"])
         # Transaction count metrics
         self.epoch_total_txns_counter = Counter(
             "epoch_total_transactions", "Total transactions processed (cumulative)", ["instance"]
@@ -691,7 +692,7 @@ class CoordinatorService:
                 commit_time,
                 fallback_time,
                 snap_time,
-                sequencer_backpressure,
+                input_rate,
                 queue_backlog,
                 idle_time_ms,
                 total_txns,
@@ -720,7 +721,7 @@ class CoordinatorService:
                 commit_time=commit_time,
                 fallback_time=fallback_time,
                 snap_time=snap_time,
-                sequencer_backpressure=sequencer_backpressure,
+                input_rate=input_rate,
                 queue_backlog=queue_backlog,
                 idle_time_ms=idle_time_ms,
                 total_txns=total_txns,
@@ -779,7 +780,7 @@ class CoordinatorService:
             worker_epoch_stats.snap_time
         )
 
-        self.backpressure_gauge.labels(instance=worker_id).set(worker_epoch_stats.sequencer_backpressure)
+        self.input_rate_counter.labels(instance=worker_id).inc(worker_epoch_stats.input_rate)
         self.queue_backlog_gauge.labels(instance=worker_id).set(worker_epoch_stats.queue_backlog)
         self.idle_time_ms_gauge.labels(instance=worker_id).set(worker_epoch_stats.idle_time_ms)
 

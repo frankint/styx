@@ -49,7 +49,7 @@ class StyxKafkaIngress(BaseIngress):
         self.kafka_ingress_task: asyncio.Task | None = None
 
         self._ingress_epoch: int | None = None
-        self._epoch_stats: dict[str, int] = {
+        self.epoch_stats: dict[str, int] = {
             "consumed": 0,  # Kafka ClientMsg records consumed
             "sequenced": 0,  # Calls enqueued locally
             "forwarded_wrong_partition": 0,  # Forwarded via TCP as WrongPartitionRequest
@@ -82,8 +82,8 @@ class StyxKafkaIngress(BaseIngress):
     def handle_message_from_kafka(self, msg: ConsumerRecord) -> None:
         current_epoch = self.sequencer.epoch_counter
         if current_epoch != self._ingress_epoch:
-            self.log_epoch_stats(self._ingress_epoch, self._epoch_stats)
-            self._epoch_stats = {"consumed": 0, "sequenced": 0, "forwarded_wrong_partition": 0}
+            self.log_epoch_stats(self._ingress_epoch, self.epoch_stats)
+            self.epoch_stats = {"consumed": 0, "sequenced": 0, "forwarded_wrong_partition": 0}
             self._ingress_epoch = current_epoch
 
         # logging.info(
@@ -92,7 +92,7 @@ class StyxKafkaIngress(BaseIngress):
         # )
         message_type: int = self.networking.get_msg_type(msg.value)
         if message_type == MessageType.ClientMsg:
-            self._epoch_stats["consumed"] += 1
+            self.epoch_stats["consumed"] += 1
             message = self.networking.decode_message(msg.value)
             operator_name, key, fun_name, params, partition = message
             run_func_payload: RunFuncPayload = RunFuncPayload(
@@ -108,14 +108,14 @@ class StyxKafkaIngress(BaseIngress):
             if key is None or self.state.exists(key, operator_name, partition):
                 # Message received in the correct partition (Normal operation)
                 self.sequencer.sequence(run_func_payload)
-                self._epoch_stats["sequenced"] += 1
+                self.epoch_stats["sequenced"] += 1
             elif (
                 true_partition := self.registered_operators[(operator_name, msg.partition)].which_partition(key)
             ) == partition:
                 logging.debug(f"Key: {key} received in the correct partition, but it was an insert operation")
                 # Message received in the correct partition, but it was an insert operation (didn't exist in the state)
                 self.sequencer.sequence(run_func_payload)
-                self._epoch_stats["sequenced"] += 1
+                self.epoch_stats["sequenced"] += 1
             else:
                 # In flight message during migration, currently the state belongs to another partition
                 dns = self.registered_operators[(operator_name, msg.partition)].dns
@@ -132,7 +132,7 @@ class StyxKafkaIngress(BaseIngress):
                         kafka_ingress_partition=partition,
                     )
                     self.sequencer.sequence(run_func_payload)
-                    self._epoch_stats["sequenced"] += 1
+                    self.epoch_stats["sequenced"] += 1
                 else:
                     payload = (
                         msg.key,
@@ -153,7 +153,7 @@ class StyxKafkaIngress(BaseIngress):
                             serializer=Serializer.MSGPACK,
                         ),
                     )
-                    self._epoch_stats["forwarded_wrong_partition"] += 1
+                    self.epoch_stats["forwarded_wrong_partition"] += 1
         else:
             logging.error(f"Invalid message type: {message_type} passed to KAFKA")
 

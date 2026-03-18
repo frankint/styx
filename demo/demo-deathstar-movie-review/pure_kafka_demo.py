@@ -54,6 +54,8 @@ current_time = datetime.now().strftime("%m%d_%H%M")
 SAVE_DIR: str = f"{sys.argv[1]}/dmr{messages_per_second}tps_{N_PARTITIONS}part_{current_time}"
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
+kill_at = int(sys.argv[8]) if len(sys.argv) > 8 else -1
+
 
 g = StateflowGraph("deathstar_movie_review",
                    operator_state_backend=LocalStateBackend.DICT,
@@ -92,7 +94,8 @@ def styx_hash(styx: SyncStyxClient, key, op) -> int:
 def init_partitioned(styx: SyncStyxClient, op, items):
     """
     Bulk init operator state by partition:
-      items: iterable[(key, value)]
+      item                   operator_state_backend=LocalStateBackend.DICT,
+s: iterable[(key, value)]
       value must match what the operator stores via ctx.put(...)
     """
     parts = {p: {} for p in range(N_PARTITIONS)}

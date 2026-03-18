@@ -7,7 +7,6 @@ from timeit import default_timer as timer
 import traceback
 from typing import TYPE_CHECKING
 
-from aiokafka import TopicPartition
 from msgspec import msgpack
 from setuptools._distutils.util import strtobool
 from styx.common.base_protocol import BaseTransactionalProtocol
@@ -30,6 +29,7 @@ from worker.util.phase_resource_tracker import PhaseResourceTracker
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from aiokafka import TopicPartition
     from styx.common.operator import Operator
     from styx.common.types import OperatorPartition
 
@@ -644,17 +644,7 @@ class AriaProtocol(BaseTransactionalProtocol):
 
         epoch_latency = max(round((epoch_end - epoch_start) * 1000, 4), 1)
         epoch_throughput = (committed_txns * 1000) // epoch_latency  # TPS
-
-        # Calculate amount of records in Kafka that have not yet been consumed by the sequencer in all partitions
-        tp_list = [TopicPartition(topic, partition) for (topic, partition) in self.topic_partition_offsets]
-        end_offsets: dict[TopicPartition, int] = await self.ingress.kafka_consumer.end_offsets(tp_list)
-        lag_partitions: dict[TopicPartition, int] = {}
-        for tp, partition in self.topic_partition_offsets:
-            next_offset = self.topic_partition_offsets[(tp, partition)] + 1
-            lag_partitions[TopicPartition(tp, partition)] = max(
-                0, end_offsets[TopicPartition(tp, partition)] - next_offset
-            )
-        total_lag = sum(lag_partitions.values())
+        input_rate = self.ingress.epoch_stats["consumed"]
 
         operator_agg: dict[tuple[str, int], dict[str, float | int]] = {}
         for (op_name, partition, _func_name), m in self.operator_metrics.items():
@@ -706,8 +696,8 @@ class AriaProtocol(BaseTransactionalProtocol):
             commit_time=commit_time,
             fallback_time=fallback_time,
             snap_time=snap_time,
-            sequencer_backpressure=(len(self.sequencer.distributed_log) + len(self.sequencer.current_epoch)),
-            queue_backlog=total_lag,
+            input_rate=input_rate,
+            queue_backlog=len(self.sequencer.distributed_log),
             idle_time_ms=round(self._idle_time_ms, 4),
             total_txns=total_txns,
             committed_txns=committed_txns,
@@ -729,7 +719,6 @@ class AriaProtocol(BaseTransactionalProtocol):
             f"commited transactions: {committed_txns} "
             f"total transactions: {total_txns} "
             f"sequencer backlog: {len(self.sequencer.distributed_log)} "
-            f"total lag: {total_lag}"
         )
 
         await self._sync_cleanup(worker_epoch_stats)
