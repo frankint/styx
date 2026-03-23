@@ -39,8 +39,8 @@ from styx.common.local_state_backends import LocalStateBackend
 from styx.common.stateflow_graph import StateflowGraph
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata
-
+from export_metadata import MetadataParams, save_metadata, get_migration_times
+from load_generator import LoadSchedule
 
 random.seed(42)
 
@@ -79,7 +79,9 @@ use_fallback_cache: bool = bool(strtobool(sys.argv[10]))
 os.environ["ENABLE_COMPRESSION"] = str(enable_compression)
 os.environ["USE_COMPOSITE_KEYS"] = str(use_composite_keys)
 os.environ["USE_FALLBACK_CACHE"] = str(use_fallback_cache)
-kill_at = int(sys.argv[12]) if len(sys.argv) > 12 else -1
+workload_profile: str = sys.argv[11]
+autoscaling_enabled: bool = sys.argv[12].lower() == "true"
+kill_at = int(sys.argv[13]) if len(sys.argv) > 13 else -1
 
 
 customers_per_district: dict[tuple, list] = {}
@@ -96,7 +98,7 @@ Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
 g = StateflowGraph("tpcc_benchmark",
                    operator_state_backend=LocalStateBackend.DICT,
-                   max_operator_parallelism=N_PARTITIONS)
+                   max_operator_parallelism=N_PARTITIONS if not autoscaling_enabled else N_PARTITIONS + 1)
 ####################################################################################################################
 customer_operator.set_n_partitions(N_PARTITIONS)
 district_operator.set_n_partitions(N_PARTITIONS)
@@ -115,6 +117,42 @@ g.add_operators(customer_operator, district_operator, history_operator, item_ope
                 new_order_txn_operator, customer_idx_operator, payment_txn_operator)
 
 
+step_size = 5  # in seconds
+
+if workload_profile == "constant":
+    load_schedule = LoadSchedule.from_generator(
+        "constant", step_size,
+        target_tps=messages_per_second,
+        time=seconds
+    )
+elif workload_profile in ("increase", "decrease", "random"):
+    load_schedule = LoadSchedule.from_generator(
+        workload_profile, step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        magnitude=5000
+    )
+elif workload_profile == "cosine":
+    load_schedule = LoadSchedule.from_generator(
+        "cosine", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        cosine_period=20,
+        mean_input_rate=messages_per_second,
+        max_divergence=messages_per_second // 2,
+        max_noise=50
+    )
+elif workload_profile == "step":
+    load_schedule = LoadSchedule.from_generator(
+        "step", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        initial_round_length=40,
+        regular_round_length=60,
+        round_rates=[1000, 2000, 7000, 4000]
+    )
+else:
+    raise ValueError(f"Unknown workload profile: {workload_profile}")
 
 # -------------------------------------------------------------------------------------
 # Cache helper
@@ -429,7 +467,8 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
             subprocess.run(["docker", "kill", "styx-worker-1"], check=False)
             print("KILL -> styx-worker-1 done")
         sec_start = timer()
-        for i in range(messages_per_second):
+        current_tps = load_schedule.get_tps(second)
+        for i in range(current_tps):
             if i % (messages_per_second // sleeps_per_second) == 0:
                 time.sleep(sleep_time)
             operator, key, func_name, params = next(tpc_c_generator)
@@ -444,7 +483,7 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
         if lps < 1:
             time.sleep(1 - lps)
         sec_end2 = timer()
-        print(f"Latency per second: {sec_end2 - sec_start}")
+        print(f"{second} | TPS: {current_tps} | Latency: {sec_end2 - sec_start:.3f}s")
     end = timer()
     print(f"Average latency per second: {(end - start) / seconds}")
     styx.close()
@@ -499,7 +538,12 @@ if __name__ == "__main__":
         use_composite_keys,
         use_fallback_cache
     )
-
+    if autoscaling_enabled:
+        migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
+    else:
+        migration_start_time = None
+        migration_end_time = None
+    
     save_metadata(
         MetadataParams(
             workload="tpcc",
@@ -512,5 +556,7 @@ if __name__ == "__main__":
             seconds=seconds,
             epoch_size=epoch_size,
             warmup_seconds=warmup_seconds,
+            migration_start_time=migration_start_time,
+            migration_end_time=migration_end_time,
         )
     )

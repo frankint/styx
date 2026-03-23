@@ -192,8 +192,10 @@ class CoordinatorService:
         )
 
         self.migration_start_time = Gauge("migration_start_time_ms", "Timestamp when the migration started", [])
-
         self.migration_end_time = Gauge("migration_end_time_ms", "Timestamp when the migration completed", [])
+        # Used for annotations in the grafana dashboard
+        self.migration_start_count = Counter("migration_start_total", "Number of migrations started", [])
+        self.migration_end_count = Counter("migration_end_total", "Number of migrations completed", [])
 
         # Phase-attributed resource metrics (aggregated per epoch in the worker, scraped at coordinator).
         self.phase_cpu_ms_total = Counter(
@@ -263,7 +265,7 @@ class CoordinatorService:
 
         # Scaling policy parameters
         self.enable_autoscale: bool = bool(strtobool(os.getenv("ENABLE_AUTOSCALE", "true")))
-        self.scale_up_cpu_threshold: float = 100.0
+        self.scale_up_cpu_threshold: float = 70.0
         self.scale_cooldown_period: float = 10.0
         self.last_scale_action_time: float = 0.0
         self.scaled_once: bool = False  # TEMPORARY
@@ -293,6 +295,7 @@ class CoordinatorService:
 
         # 1) Build an updated graph (same topology, updated partition count)
         new_graph = deepcopy(self.coordinator.submitted_graph)
+        new_graph.max_operator_parallelism = new_n_partitions
         for _op_name, op in iter(new_graph):
             # Scale all operators uniformly for now (fits YCSB demo; can be extended per-operator later)
             if hasattr(op, "set_n_partitions"):
@@ -327,6 +330,7 @@ class CoordinatorService:
         )
         await self.coordinator.update_stateflow_graph(new_graph)
         self.migration_start_time.set(time.time_ns() // 1_000_000)
+        self.migration_start_count.inc()
 
     async def coordinator_controller(
         self,
@@ -853,6 +857,8 @@ class CoordinatorService:
             if not sync_complete:
                 return
 
+            self.migration_end_time.set(time.time_ns() // 1_000_000)
+            self.migration_end_count.inc()
             logging.warning(
                 f"MIGRATION_FINISHED at time: {time.time_ns() // 1_000_000}",
             )
@@ -931,16 +937,18 @@ class CoordinatorService:
             return
 
         logging.warning(f"Analyzing scaling metrics for CPU value: {cpu_val} and worker: {worker_id}")
-        self.cpu_metric_window.add(cpu_val)
+        if worker_id not in self.coordinator.worker_pool.standby_worker_ids:
+            self.cpu_metric_window.add(cpu_val)
         avg_cpu = self.cpu_metric_window.average()
         logging.warning(f"Current average CPU value: {avg_cpu}")
 
         ## Rolling average of the last self.scale_window_size cpu usage values
-        if avg_cpu and avg_cpu > self.scale_up_cpu_threshold:
-            logging.warning(f"Scaling up for worker: {worker_id}")
+        if avg_cpu and avg_cpu > self.scale_up_cpu_threshold and not self.scaled_once:
             self.scaled_once = True
             self.last_scale_action_time = time.time()
-            await self.scale_up(2, 1)
+            to_add = 1
+            new_partition_num = len(self.coordinator.worker_pool.get_participating_workers()) + to_add
+            await self.scale_up(new_partition_num, to_add)
 
     async def finalize_migration_repartition(self) -> None:
         async with asyncio.TaskGroup() as tg:

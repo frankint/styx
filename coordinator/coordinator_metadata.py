@@ -227,6 +227,10 @@ class Coordinator:
             raise NotAStateflowGraphError
         # TODO the cluster was balanced by the previous deployment, if the graph is complex it might be
         #  unbalanced after the update
+
+        # Update max parallelism
+        self.max_operator_parallelism = new_stateflow_graph.max_operator_parallelism
+
         for _, operator in iter(new_stateflow_graph):
             for partition in range(self.max_operator_parallelism):
                 operator_copy = deepcopy(operator)

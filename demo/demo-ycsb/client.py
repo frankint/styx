@@ -3,7 +3,6 @@ import os
 import subprocess
 import sys
 import time
-import os
 
 import boto3
 
@@ -20,9 +19,9 @@ from styx.common.local_state_backends import LocalStateBackend
 from styx.common.operator import Operator
 from styx.common.stateflow_graph import StateflowGraph
 
-
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata
+from export_metadata import MetadataParams, save_metadata, get_migration_times
+from load_generator import LoadSchedule
 from tqdm import tqdm
 from ycsb import ycsb_operator
 from zipfian_generator import ZipfGenerator
@@ -55,13 +54,52 @@ if not os.path.exists(SAVE_DIR):
 warmup_seconds: int = int(sys.argv[8])
 run_with_validation = sys.argv[9].lower() == "true"
 epoch_size = int(sys.argv[10])
-kill_at: int = int(sys.argv[11]) if len(sys.argv) > 11 else -1
+workload_profile: str = sys.argv[11]
+autoscaling_enabled: bool = sys.argv[12].lower() == "true"
+kill_at: int = int(sys.argv[13]) if len(sys.argv) > 13 else -1
 ####################################################################################################################
 g = StateflowGraph("ycsb-benchmark",
                    operator_state_backend=LocalStateBackend.DICT,
-                   max_operator_parallelism=N_PARTITIONS)
+                   max_operator_parallelism=N_PARTITIONS if not autoscaling_enabled else N_PARTITIONS + 1)
 ycsb_operator.set_n_partitions(N_PARTITIONS)
 g.add_operators(ycsb_operator)
+
+step_size = 5  # in seconds
+
+if workload_profile == "constant":
+    load_schedule = LoadSchedule.from_generator(
+        "constant", step_size,
+        target_tps=messages_per_second,
+        time=seconds
+    )
+elif workload_profile in ("increase", "decrease", "random"):
+    load_schedule = LoadSchedule.from_generator(
+        workload_profile, step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        magnitude=5000
+    )
+elif workload_profile == "cosine":
+    load_schedule = LoadSchedule.from_generator(
+        "cosine", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        cosine_period=20,
+        mean_input_rate=messages_per_second,
+        max_divergence=messages_per_second // 2,
+        max_noise=50
+    )
+elif workload_profile == "step":
+    load_schedule = LoadSchedule.from_generator(
+        "step", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        initial_round_length=40,
+        regular_round_length=60,
+        round_rates=[1000, 2000, 7000, 4000]
+    )
+else:
+    raise ValueError(f"Unknown workload profile: {workload_profile}")
 
 def submit_graph(styx: SyncStyxClient):
     print(f"Partitions: {list(g.nodes.values())[0].n_partitions}")
@@ -120,8 +158,12 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
             subprocess.run(["docker", "kill", "styx-worker-1"], check=False)
             print("KILL -> styx-worker-1 done")
         sec_start = timer()
-        step = max(1, messages_per_second // sleeps_per_second)
-        for i in range(messages_per_second):
+        
+        current_tps = load_schedule.get_tps(second)
+        sleeps_per_second = 100 if current_tps > 100 else 1
+        step = max(1, current_tps // sleeps_per_second)
+        
+        for i in range(current_tps):
             if i % step == 0:
                 time.sleep(sleep_time)
             operator, key, func_name, params = next(ycsb_generator)
@@ -136,7 +178,8 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
         if lps < 1:
             time.sleep(1 - lps)
         sec_end2 = timer()
-        print(f"{second} | Latency per second: {sec_end2 - sec_start}")
+        print(f"{second} | TPS: {current_tps} | Latency: {sec_end2 - sec_start:.3f}s")
+
     end = timer()
     print(f"Average latency per second: {(end - start) / seconds}")
 
@@ -225,11 +268,19 @@ if __name__ == "__main__":
         run_with_validation
     )
 
+    if autoscaling_enabled:
+        migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
+    else:
+        migration_start_time = None
+        migration_end_time = None
+    
     save_metadata(
         MetadataParams(
             workload="ycsb",
             start=start_time,
             end=end_time,
+            migration_start_time=migration_start_time,
+            migration_end_time=migration_end_time,
             out_path=SAVE_DIR,
             n_partitions=N_PARTITIONS,
             messages_per_second=messages_per_second * threads,

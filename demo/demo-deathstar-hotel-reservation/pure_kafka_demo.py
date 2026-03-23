@@ -30,7 +30,8 @@ from styx.common.local_state_backends import LocalStateBackend
 from styx.common.stateflow_graph import StateflowGraph
 from datetime import datetime
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata
+from export_metadata import MetadataParams, save_metadata, get_migration_times
+from load_generator import LoadSchedule
 
 threads = int(sys.argv[2])
 barrier = multiprocessing.Barrier(threads)
@@ -46,13 +47,15 @@ STYX_PORT: int = int(os.getenv("STYX_PORT", "8886"))
 KAFKA_URL: str = os.getenv("KAFKA_URL", "localhost:9092")
 current_time = datetime.now().strftime("%m%d_%H%M")
 SAVE_DIR: str = f"{sys.argv[1]}/dhr{messages_per_second}tps_{N_PARTITIONS}part_{current_time}"
-kill_at = int(sys.argv[8]) if len(sys.argv) > 8 else -1
+workload_profile: str = sys.argv[10]
+autoscaling_enabled: bool = sys.argv[11].lower() == "true"
+kill_at = int(sys.argv[12]) if len(sys.argv) > 12 else -1
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 
 g = StateflowGraph("deathstar_hotel_reservations",
                    operator_state_backend=LocalStateBackend.DICT,
-                   max_operator_parallelism=N_PARTITIONS)
+                   max_operator_parallelism=N_PARTITIONS if not autoscaling_enabled else N_PARTITIONS + 1)
 ####################################################################################################################
 flight_operator.set_n_partitions(N_PARTITIONS)
 geo_operator.set_n_partitions(N_PARTITIONS)
@@ -73,6 +76,42 @@ g.add_operators(
     user_operator,
 )
 
+step_size = 5  # in seconds
+
+if workload_profile == "constant":
+    load_schedule = LoadSchedule.from_generator(
+        "constant", step_size,
+        target_tps=messages_per_second,
+        time=seconds
+    )
+elif workload_profile in ("increase", "decrease", "random"):
+    load_schedule = LoadSchedule.from_generator(
+        workload_profile, step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        magnitude=5000
+    )
+elif workload_profile == "cosine":
+    load_schedule = LoadSchedule.from_generator(
+        "cosine", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        cosine_period=20,
+        mean_input_rate=messages_per_second,
+        max_divergence=messages_per_second // 2,
+        max_noise=50
+    )
+elif workload_profile == "step":
+    load_schedule = LoadSchedule.from_generator(
+        "step", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        initial_round_length=40,
+        regular_round_length=60,
+        round_rates=[1000, 2000, 7000, 4000]
+    )
+else:
+    raise ValueError(f"Unknown workload profile: {workload_profile}")
 
 def styx_hash(styx: SyncStyxClient, key, op) -> int:
     # IMPORTANT: op is the Operator object; Styx knows how to map it.
@@ -363,6 +402,11 @@ if __name__ == "__main__":
         warmup_seconds,
         threads
     )
+    if autoscaling_enabled:
+        migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
+    else:
+        migration_start_time = None
+        migration_end_time = None
 
     save_metadata(MetadataParams(
         workload="dhr",
@@ -375,4 +419,6 @@ if __name__ == "__main__":
         seconds=seconds,
         epoch_size=epoch_size,
         warmup_seconds=warmup_seconds,
+        migration_start_time=migration_start_time,
+        migration_end_time=migration_end_time,
     ))

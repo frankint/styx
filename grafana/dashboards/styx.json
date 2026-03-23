@@ -19,7 +19,13 @@
           "uid": "PBFA97CFB590B2093"
         },
         "enable": true,
-        "expr": "changes(migration_start_time_ms[15s]) > 0",
+        "expr": "migration_start_time_ms",
+        "filter": {
+          "exclude": true,
+          "ids": [
+            18
+          ]
+        },
         "hide": false,
         "iconColor": "orange",
         "name": "Scale up start",
@@ -30,7 +36,26 @@
           "type": "dashboard"
         },
         "textFormat": "Migration Started",
-        "titleFormat": "Scale Up Call"
+        "titleFormat": "Scale Up Call",
+        "useValueForTime": "on"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PBFA97CFB590B2093"
+        },
+        "enable": true,
+        "expr": "migration_end_time_ms",
+        "filter": {
+          "exclude": true,
+          "ids": [
+            18
+          ]
+        },
+        "hide": false,
+        "iconColor": "yellow",
+        "name": "Scale up end",
+        "useValueForTime": "on"
       }
     ]
   },
@@ -2364,6 +2389,6 @@
   "timezone": "browser",
   "title": "Styx System Overview",
   "uid": "beckc0nxpeupsf",
-  "version": 6,
+  "version": 9,
   "weekStart": ""
 }

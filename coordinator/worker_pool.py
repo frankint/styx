@@ -47,7 +47,7 @@ class WorkerPool:
         # priority queue to be used for roundrobin scheduling
         self._queue: list[list[int | Worker | str]] = []
         self._standby_queue: deque[Worker] = deque()
-        self._standby_worker_ids: set[int] = set()
+        self.standby_worker_ids: set[int] = set()
         # index is used so that we have deterministic selection when priority is the same
         self._index: int = 0
         # Worker ids start from 1
@@ -102,7 +102,7 @@ class WorkerPool:
         )
         if standby:
             self._standby_queue.append(worker)
-            self._standby_worker_ids.add(worker_id)
+            self.standby_worker_ids.add(worker_id)
         else:
             self.put(worker)
         return worker_id
@@ -214,13 +214,13 @@ class WorkerPool:
         if not self._standby_queue:
             return None
         worker: Worker = self._standby_queue.popleft()
-        self._standby_worker_ids.remove(worker.worker_id)
+        self.standby_worker_ids.remove(worker.worker_id)
         self.put(worker)
         return worker
 
     def is_worker_active(self, worker_id: int) -> bool:
         return (
-            worker_id not in self._standby_worker_ids
+            worker_id not in self.standby_worker_ids
             and worker_id not in self.dead_worker_ids
             and worker_id in self._worker_queue_idx
         )

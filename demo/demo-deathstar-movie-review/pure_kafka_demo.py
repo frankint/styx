@@ -36,7 +36,8 @@ from workload_data import charset, movie_titles
 import os
 from datetime import datetime
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata
+from export_metadata import MetadataParams, save_metadata, get_migration_times
+from load_generator import LoadSchedule
 
 threads = int(sys.argv[2])
 barrier = multiprocessing.Barrier(threads)
@@ -54,12 +55,13 @@ current_time = datetime.now().strftime("%m%d_%H%M")
 SAVE_DIR: str = f"{sys.argv[1]}/dmr{messages_per_second}tps_{N_PARTITIONS}part_{current_time}"
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
-kill_at = int(sys.argv[8]) if len(sys.argv) > 8 else -1
-
+workload_profile: str = sys.argv[10]
+autoscaling_enabled: bool = sys.argv[11].lower() == "true"
+kill_at = int(sys.argv[12]) if len(sys.argv) > 12 else -1
 
 g = StateflowGraph("deathstar_movie_review",
                    operator_state_backend=LocalStateBackend.DICT,
-                   max_operator_parallelism=N_PARTITIONS)
+                   max_operator_parallelism=N_PARTITIONS if not autoscaling_enabled else N_PARTITIONS + 1)
 ####################################################################################################################
 compose_review_operator.set_n_partitions(N_PARTITIONS)
 movie_id_operator.set_n_partitions(N_PARTITIONS)
@@ -82,6 +84,42 @@ g.add_operators(
     frontend_operator
 )
 
+step_size = 5  # in seconds
+
+if workload_profile == "constant":
+    load_schedule = LoadSchedule.from_generator(
+        "constant", step_size,
+        target_tps=messages_per_second,
+        time=seconds
+    )
+elif workload_profile in ("increase", "decrease", "random"):
+    load_schedule = LoadSchedule.from_generator(
+        workload_profile, step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        magnitude=5000
+    )
+elif workload_profile == "cosine":
+    load_schedule = LoadSchedule.from_generator(
+        "cosine", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        cosine_period=20,
+        mean_input_rate=messages_per_second,
+        max_divergence=messages_per_second // 2,
+        max_noise=50
+    )
+elif workload_profile == "step":
+    load_schedule = LoadSchedule.from_generator(
+        "step", step_size,
+        target_tps=messages_per_second,
+        time=seconds,
+        initial_round_length=40,
+        regular_round_length=60,
+        round_rates=[1000, 2000, 7000, 4000]
+    )
+else:
+    raise ValueError(f"Unknown workload profile: {workload_profile}")
 
 # -------------------------------------------------------------------------------------
 # init_data helpers
@@ -292,6 +330,12 @@ if __name__ == "__main__":
         threads
     )
 
+    if autoscaling_enabled:
+        migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
+    else:
+        migration_start_time = None
+        migration_end_time = None
+    
     save_metadata(MetadataParams(
         workload="dmr",
         start=start_time,
@@ -301,6 +345,8 @@ if __name__ == "__main__":
         messages_per_second=messages_per_second,
         n_keys=2000,
         seconds=seconds,
-            epoch_size=epoch_size,
+        migration_start_time=migration_start_time,
+        migration_end_time=migration_end_time,
+        epoch_size=epoch_size,
         warmup_seconds=warmup_seconds,
     ))

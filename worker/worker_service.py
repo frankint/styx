@@ -511,7 +511,6 @@ class Worker:
                     ),
                     self.dns,
                     self.id,
-                    self.peers,
                     self.worker_ip,
                 ).add_done_callback(self.repartitioning_callback)
 
