@@ -134,7 +134,7 @@ class InMemoryOperatorState(BaseAriaState):
         batch_to_send: dict[OperatorPartition, KVPairs] = defaultdict(dict)
         c = 0
         operator_partitions_to_clear = []
-        logging.warning(f"ASYNC_MIGRATION | Batch size {batch_size}, keys_to_send: {self.keys_to_send}")
+        #logging.warning(f"ASYNC_MIGRATION | Batch size {batch_size}, keys_to_send: {self.keys_to_send}")
         for operator_partition, keys in self.keys_to_send.items():
             operator_name, _ = operator_partition
             while keys and c < batch_size:

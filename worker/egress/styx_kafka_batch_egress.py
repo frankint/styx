@@ -50,6 +50,7 @@ class StyxKafkaBatchEgress(BaseEgress):
             bootstrap_servers=[KAFKA_URL],
             client_id=f"W{worker_id}_{uuid.uuid4()}",
             acks=1,
+            metadata_max_age_ms=5000,  # Refresh metadata every 5 seconds for faster scale-up
         )
         while True:
             try:

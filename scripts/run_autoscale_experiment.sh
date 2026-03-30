@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 styx_threads_per_worker=1
 enable_compression=true
@@ -83,7 +83,7 @@ else
     # docker-compose mode
     bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "$autoscaling_enabled"
     sleep 10
-    docker compose up --scale worker-standby=1 -d worker-standby >/dev/null
+    docker compose --profile autoscale up --scale worker-standby=1 -d worker-standby >/dev/null
 fi
 
 if [[ $workload_name == "ycsbt" ]]; then

@@ -61,6 +61,8 @@ services:
       - coordinator
 
   worker-standby:
+    profiles:
+      - autoscale
     build:
       context: .
       dockerfile: worker/worker.dockerfile

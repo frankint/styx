@@ -78,7 +78,7 @@ class CosineLoadGenerator(LoadGenerator):
         values = []
         for i in range(0, self.time):
             period = (2 * math.pi / self.cosine_period)
-            value = self.mean_input_rate + self.max_divergence * math.cos(period * i)
+            value = self.mean_input_rate + self.max_divergence * math.cos(period * i + math.pi)
             value += random.random() * (2 * self.max_noise) - self.max_noise
             if self.max_threshold is not None and value > self.max_threshold:
                 value = self.max_threshold

@@ -55,9 +55,9 @@ current_time = datetime.now().strftime("%m%d_%H%M")
 SAVE_DIR: str = f"{sys.argv[1]}/dmr{messages_per_second}tps_{N_PARTITIONS}part_{current_time}"
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
-workload_profile: str = sys.argv[10]
-autoscaling_enabled: bool = sys.argv[11].lower() == "true"
-kill_at = int(sys.argv[12]) if len(sys.argv) > 12 else -1
+workload_profile: str = sys.argv[8]
+autoscaling_enabled: bool = sys.argv[9].lower() == "true"
+kill_at = int(sys.argv[10]) if len(sys.argv) > 10 else -1
 
 g = StateflowGraph("deathstar_movie_review",
                    operator_state_backend=LocalStateBackend.DICT,

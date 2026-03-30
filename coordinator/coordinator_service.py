@@ -31,6 +31,7 @@ from styx.common.util.aio_task_scheduler import AIOTaskScheduler
 import uvloop
 
 from coordinator.migration_metadata import MigrationMetadata
+from coordinator.pid_controller import BacklogPIDController
 
 if TYPE_CHECKING:
     from styx.common.stateflow_graph import StateflowGraph
@@ -191,8 +192,12 @@ class CoordinatorService:
             ["instance", "operator", "partition"],
         )
 
-        self.migration_start_time = Gauge("migration_start_time_ms", "Timestamp when the migration started", [])
-        self.migration_end_time = Gauge("migration_end_time_ms", "Timestamp when the migration completed", [])
+        self.migration_start_time_gauge = Gauge("migration_start_time_ms", "Timestamp when the migration started", [])
+        self.migration_end_time_gauge = Gauge("migration_end_time_ms", "Timestamp when the migration completed", [])
+
+        self.migration_start_time: float = 0.0
+        self.migration_end_time: float = 0.0
+        
         # Used for annotations in the grafana dashboard
         self.migration_start_count = Counter("migration_start_total", "Number of migrations started", [])
         self.migration_end_count = Counter("migration_end_total", "Number of migrations completed", [])
@@ -272,6 +277,14 @@ class CoordinatorService:
         self.scale_window_seconds: int = 5
         self.cpu_metric_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
 
+        self.pid_controller = BacklogPIDController()
+        # Per-epoch accumulators: populated as each worker reports, consumed when all have synced
+        self.epoch_backlog_accum: dict[int, float] = {}
+        self.epoch_throughput_accum: dict[int, float] = {}
+
+        self.tps_window_seconds: int = 10
+        self.tps_sliding_window: SlidingWindowMetric = SlidingWindowMetric(self.tps_window_seconds)
+
     async def scale_up(self, new_n_partitions: int, new_worker_num: int) -> None:
         if self.migration_in_progress:
             logging.warning("ManualScale requested but a migration is already in progress.")
@@ -317,6 +330,11 @@ class CoordinatorService:
                 break
             logging.warning(f"Activated standby worker_id: {worker.worker_id}")
 
+        # 3.5) Expand Kafka topic partitions to match the new partition count
+        await self.coordinator.expand_kafka_topic_partitions(new_graph, new_n_partitions)
+        # Allow time for Kafka metadata to propagate to brokers and workers
+        await asyncio.sleep(2)
+
         # 4) Recompute assignments so standby/new workers become participating
         self.coordinator.reschedule_all_partitions_round_robin(new_graph)
 
@@ -329,7 +347,9 @@ class CoordinatorService:
             f"new graph={new_graph}"
         )
         await self.coordinator.update_stateflow_graph(new_graph)
-        self.migration_start_time.set(time.time_ns() // 1_000_000)
+        start_time = time.time_ns()
+        self.migration_start_time_gauge.set(start_time / 1_000_000)
+        self.migration_start_time = start_time
         self.migration_start_count.inc()
 
     async def coordinator_controller(
@@ -570,9 +590,6 @@ class CoordinatorService:
             self.network_rx_gauge.labels(instance=worker_id).set(rx_net)  # KB
             self.network_tx_gauge.labels(instance=worker_id).set(tx_net)  # KB
 
-            if self.enable_autoscale:
-                await self.analyze_scaling_metrics(cpu_perc, worker_id)
-
             heartbeat_rcv_time = timer()
             logging.info(
                 f"Heartbeat received from: {worker_id} at time: {heartbeat_rcv_time}",
@@ -740,6 +757,8 @@ class CoordinatorService:
                 operator_epoch_stats=operator_epoch_stats,
                 phase_resources=phase_resources,
             )
+            self.epoch_backlog_accum[worker_id] = worker_epoch_stats.queue_backlog
+            self.epoch_throughput_accum[worker_id] = worker_epoch_stats.epoch_throughput
 
             self._record_epoch_metrics(
                 worker_epoch_stats,
@@ -755,6 +774,31 @@ class CoordinatorService:
                 Serializer.MSGPACK,
             )
             self.aria_metadata.cleanup(epoch_end=True)
+
+            # All workers have synced -- aggregate epoch-level metrics
+            total_backlog = sum(self.epoch_backlog_accum.values())
+            total_tps = sum(self.epoch_throughput_accum.values())
+            self.tps_sliding_window.add(total_tps)
+
+            # Clear accumulators for the next epoch
+            self.epoch_backlog_accum.clear()
+            self.epoch_throughput_accum.clear()
+
+            if self.enable_autoscale and not self.migration_in_progress:
+                smoothed_tps = self.tps_sliding_window.average() or 0.0
+                pid_output = self.pid_controller.compute(total_backlog, smoothed_tps)
+                logging.warning(
+                    f"PID | output={pid_output:.3f} backlog={total_backlog} "
+                    f"tps={total_tps:.0f} smoothed_tps={smoothed_tps:.0f}"
+                )
+                if pid_output >= self.pid_controller.scale_up_threshold and not (
+                    time.time() - self.last_scale_action_time < self.scale_cooldown_period or self.scaled_once
+                ):
+                    self.scaled_once = True
+                    to_add = 1
+                    new_partition_num = len(self.coordinator.worker_pool.get_participating_workers()) + to_add
+                    await self.scale_up(new_partition_num, to_add)
+                    self.last_scale_action_time = time.time()
 
     def _record_epoch_metrics(
         self,
@@ -857,10 +901,12 @@ class CoordinatorService:
             if not sync_complete:
                 return
 
-            self.migration_end_time.set(time.time_ns() // 1_000_000)
+            end_time = time.time_ns()
+            self.migration_end_time_gauge.set(end_time / 1_000_000)
+            self.migration_end_time = end_time
             self.migration_end_count.inc()
             logging.warning(
-                f"MIGRATION_FINISHED at time: {time.time_ns() // 1_000_000}",
+                f"MIGRATION_DURATION: {(self.migration_end_time / 1_000_000_000)- (self.migration_start_time / 1_000_000_000)} s",
             )
             await self.migration_metadata.cleanup(mt)
             self.migration_in_progress = False

@@ -187,7 +187,6 @@ class StatefulFunction(Function):
                 f"key={self.__key}, "
                 f"in_remote_keys={self.__state.in_remote_keys(self.__key, self.__operator_name, self.__partition)}, "
                 f"operator_partitions={self.__state.operator_partitions}, "
-                f"state data={self.__state.data}, "
                 f"keys_sent={self.__state.keys_sent}, "
             )
             return e, -1, -1

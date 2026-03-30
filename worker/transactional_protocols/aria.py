@@ -374,9 +374,9 @@ class AriaProtocol(BaseTransactionalProtocol):
                 params,
             ) = self.networking.decode_message(data)
 
-            logging.warning(
-                f"Aria WrongPartitionRequest: {key}:{operator_name}:{kafka_ingress_partition}, partition: {partition}",
-            )
+            #logging.warning(
+            #    f"Aria WrongPartitionRequest: {key}:{operator_name}:{kafka_ingress_partition}, partition: {partition}",
+            #)
 
             payload = RunFuncPayload(
                 request_id=request_id,

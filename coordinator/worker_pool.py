@@ -66,6 +66,9 @@ class WorkerPool:
             live.append(worker)
         return live
 
+    def get_live_worker_ids(self) -> list[int]:
+        return [worker.worker_id for worker in self.get_live_workers()]
+
     def reset_all_assignments(self) -> None:
         """
         Clears all operator assignments and rebuilds the priority queue.

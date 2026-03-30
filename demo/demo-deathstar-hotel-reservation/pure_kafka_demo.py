@@ -47,9 +47,9 @@ STYX_PORT: int = int(os.getenv("STYX_PORT", "8886"))
 KAFKA_URL: str = os.getenv("KAFKA_URL", "localhost:9092")
 current_time = datetime.now().strftime("%m%d_%H%M")
 SAVE_DIR: str = f"{sys.argv[1]}/dhr{messages_per_second}tps_{N_PARTITIONS}part_{current_time}"
-workload_profile: str = sys.argv[10]
-autoscaling_enabled: bool = sys.argv[11].lower() == "true"
-kill_at = int(sys.argv[12]) if len(sys.argv) > 12 else -1
+workload_profile: str = sys.argv[8]
+autoscaling_enabled: bool = sys.argv[9].lower() == "true"
+kill_at = int(sys.argv[10]) if len(sys.argv) > 10 else -1
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 

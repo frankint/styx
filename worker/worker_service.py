@@ -618,7 +618,7 @@ class Worker:
     ) -> None:
         n_op, payload = self.networking.decode_message(data)
         async with self.networking_locks[msg_type]:
-            logging.warning(f"MIGRATION | ReceiveMigrationHashes | partition {n_op} | {payload}")
+            #logging.warning(f"MIGRATION | ReceiveMigrationHashes | partition {n_op} | {payload}")
             self.local_state.add_remote_keys(n_op, payload)
 
     async def _handle_request_remote_key(

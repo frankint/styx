@@ -30,7 +30,7 @@ echo "====================================================="
 
 # START NEW DEPLOYMENT
 docker compose -f docker-compose-kafka.yml up -d >/dev/null
-sleep 5
+sleep 10
 docker compose -f docker-compose-s3.yml up -d >/dev/null
 sleep 10
 export STYX_WORKER_THREADS="$threads_per_worker"
@@ -44,5 +44,8 @@ docker compose build \
     --build-arg enable_compression="$enable_compression" \
     --build-arg use_composite_keys="$use_composite_keys" \
     --build-arg use_fallback_cache="$use_fallback_cache"
+if [[ "$enable_autoscale" == "true" ]]; then
+    docker compose --profile autoscale build
+fi
 docker compose up --scale worker="$threaded_scale_factor" -d >/dev/null
 sleep 5

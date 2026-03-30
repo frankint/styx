@@ -75,6 +75,7 @@ class SyncStyxClient(BaseStyxClient):
             "enable.idempotence": True,
             "max.in.flight.requests.per.connection": 1,
             "client.id": str(uuid.uuid4()),
+            "metadata.max.age.ms": 5000,  # Refresh metadata every 5s for scale-up support
         }
         self.graph_known_event: threading.Event = threading.Event()
 
@@ -175,6 +176,24 @@ class SyncStyxClient(BaseStyxClient):
                 )
         function_results_consumer.close()
 
+    def _wait_for_kafka_partitions(self, graph: StateflowGraph) -> None:
+        """Waits until the Kafka producer metadata knows about all required partitions."""
+        if not hasattr(self, "_kafka_producer"):
+            return
+        for operator_name, operator in graph.nodes.items():
+            required_partitions = operator.n_partitions
+            while True:
+                md: ClusterMetadata = self._kafka_producer.list_topics(topic=operator_name)
+                if operator_name in md.topics:
+                    actual_partitions = len(md.topics[operator_name].partitions)
+                    if actual_partitions >= required_partitions:
+                        break
+                logging.warning(
+                    f"Waiting for Kafka to know about {required_partitions} partitions "
+                    f"for topic {operator_name} (currently knows {actual_partitions if operator_name in md.topics else 0})",
+                )
+                time.sleep(0.5)
+
     def start_consuming_metadata(self) -> None:
         """Consumes metadata from Kafka and updates the current graph.
 
@@ -200,6 +219,8 @@ class SyncStyxClient(BaseStyxClient):
                 continue
             metadata = cloudpickle_deserialization(msg.value())
             if isinstance(metadata, StateflowGraph):
+                # Wait for Kafka producer to know about the new partitions before using the new graph
+                self._wait_for_kafka_partitions(metadata)
                 self._current_active_graph = metadata
                 self.graph_known_event.set()
         metadata_consumer.close()
@@ -321,7 +342,7 @@ class SyncStyxClient(BaseStyxClient):
         )
         s = socket.socket()
         s.connect((self._styx_coordinator_adr, self._styx_coordinator_port))
-        s.send(msg)
+        s.sendall(msg)
         s.close()
 
     def update_dataflow(
@@ -339,7 +360,7 @@ class SyncStyxClient(BaseStyxClient):
         )
         s = socket.socket()
         s.connect((self._styx_coordinator_adr, self._styx_coordinator_port))
-        s.send(msg)
+        s.sendall(msg)
         s.close()
 
     def notify_init_data_complete(self) -> None:
@@ -350,5 +371,5 @@ class SyncStyxClient(BaseStyxClient):
         )
         s = socket.socket()
         s.connect((self._styx_coordinator_adr, self._styx_coordinator_port))
-        s.send(msg)
+        s.sendall(msg)
         s.close()

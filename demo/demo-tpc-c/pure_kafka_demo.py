@@ -44,7 +44,6 @@ from load_generator import LoadSchedule
 
 random.seed(42)
 
-#SAVE_DIR: str = sys.argv[1]
 threads = int(sys.argv[2])
 N_PARTITIONS = int(sys.argv[3])
 messages_per_second = int(sys.argv[4])
@@ -63,6 +62,7 @@ if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 
 N_PARTITIONS = min(N_W, N_PARTITIONS)
+print(f"N_PARTITIONS: {N_PARTITIONS}")
 C_Per_District = 3000
 D_Per_Warehouse = 10
 N_D = N_W * D_Per_Warehouse
@@ -79,9 +79,9 @@ use_fallback_cache: bool = bool(strtobool(sys.argv[10]))
 os.environ["ENABLE_COMPRESSION"] = str(enable_compression)
 os.environ["USE_COMPOSITE_KEYS"] = str(use_composite_keys)
 os.environ["USE_FALLBACK_CACHE"] = str(use_fallback_cache)
-workload_profile: str = sys.argv[11]
-autoscaling_enabled: bool = sys.argv[12].lower() == "true"
-kill_at = int(sys.argv[13]) if len(sys.argv) > 13 else -1
+workload_profile: str = sys.argv[12]
+autoscaling_enabled: bool = sys.argv[13].lower() == "true"
+kill_at = int(sys.argv[14]) if len(sys.argv) > 14 else -1
 
 
 customers_per_district: dict[tuple, list] = {}

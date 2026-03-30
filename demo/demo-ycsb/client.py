@@ -60,7 +60,7 @@ kill_at: int = int(sys.argv[13]) if len(sys.argv) > 13 else -1
 ####################################################################################################################
 g = StateflowGraph("ycsb-benchmark",
                    operator_state_backend=LocalStateBackend.DICT,
-                   max_operator_parallelism=N_PARTITIONS if not autoscaling_enabled else N_PARTITIONS + 1)
+                   max_operator_parallelism=N_PARTITIONS)
 ycsb_operator.set_n_partitions(N_PARTITIONS)
 g.add_operators(ycsb_operator)
 
@@ -84,9 +84,9 @@ elif workload_profile == "cosine":
         "cosine", step_size,
         target_tps=messages_per_second,
         time=seconds,
-        cosine_period=20,
+        cosine_period=30,
         mean_input_rate=messages_per_second,
-        max_divergence=messages_per_second // 2,
+        max_divergence=1500,
         max_noise=50
     )
 elif workload_profile == "step":

@@ -35,8 +35,8 @@
           "tags": [],
           "type": "dashboard"
         },
-        "textFormat": "Migration Started",
-        "titleFormat": "Scale Up Call",
+        "textFormat": "",
+        "titleFormat": "Scale Up Start",
         "useValueForTime": "on"
       },
       {
@@ -55,6 +55,7 @@
         "hide": false,
         "iconColor": "yellow",
         "name": "Scale up end",
+        "titleFormat": "Scale up end",
         "useValueForTime": "on"
       }
     ]
@@ -1944,8 +1945,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "orange",
@@ -2057,8 +2057,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "orange",
@@ -2144,8 +2143,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -2244,8 +2242,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -2304,8 +2301,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "orange",
@@ -2389,6 +2385,6 @@
   "timezone": "browser",
   "title": "Styx System Overview",
   "uid": "beckc0nxpeupsf",
-  "version": 9,
+  "version": 12,
   "weekStart": ""
 }

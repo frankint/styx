@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
-from confluent_kafka.admin import AdminClient, KafkaException, NewTopic
+from confluent_kafka.admin import AdminClient, KafkaException, NewPartitions, NewTopic
 from setuptools._distutils.util import strtobool
 from snapshot_compactor import start_snapshot_compaction
 from styx.common.exceptions import NotAStateflowGraphError
@@ -281,7 +281,7 @@ class Coordinator:
 
         self.worker_pool.reset_all_assignments()
         for operator_name, operator in iter(stateflow_graph):
-            for partition in range(self.max_operator_parallelism):
+            for partition in range(stateflow_graph.max_operator_parallelism):
                 operator_copy = deepcopy(operator)
                 if partition >= operator.n_partitions:
                     operator_copy.make_shadow()
@@ -357,6 +357,39 @@ class Coordinator:
             f"participating={len(self.worker_pool.get_participating_workers())} "
             f"snapshot_id={snap_id}"
         )
+
+    async def expand_kafka_topic_partitions(
+        self, stateflow_graph: StateflowGraph, new_partition_count: int
+    ) -> None:
+        """Expand existing Kafka topics to have more partitions for scale-up."""
+        if KAFKA_URL is None:
+            logging.error("Kafka URL not given")
+            return
+
+        while True:
+            try:
+                client = AdminClient({"bootstrap.servers": KAFKA_URL})
+                break
+            except KafkaException:
+                logging.warning(
+                    f"Kafka at {KAFKA_URL} not ready yet, sleeping for 1 second",
+                )
+                await asyncio.sleep(1)
+
+        topics_to_expand = []
+        for operator in stateflow_graph.nodes.values():
+            topics_to_expand.append(NewPartitions(operator.name, new_partition_count))
+            topics_to_expand.append(NewPartitions(operator.name + "--OUT", new_partition_count))
+
+        futures = client.create_partitions(topics_to_expand)
+        for topic, future in futures.items():
+            try:
+                future.result()
+                logging.warning(
+                    f"Topic {topic} expanded to {new_partition_count} partitions",
+                )
+            except KafkaException as e:
+                logging.warning(f"Failed to expand topic {topic}: {e}")
 
     async def create_kafka_ingress_topics(self, stateflow_graph: StateflowGraph) -> None:
         if KAFKA_URL is None:
