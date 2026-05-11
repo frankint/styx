@@ -1,12 +1,13 @@
 import asyncio
+from collections import defaultdict
+import contextlib
+from dataclasses import astuple
 import os
 import time
-
-from traceback import format_exc
 from timeit import default_timer as timer
+from traceback import format_exc
 from typing import TYPE_CHECKING
-from dataclasses import astuple
-from collections import defaultdict
+
 from msgspec import msgpack
 from setuptools._distutils.util import strtobool
 from styx.common.base_protocol import BaseTransactionalProtocol
@@ -96,6 +97,7 @@ class AriaProtocol(BaseTransactionalProtocol):
         # worker_id: set of aborted t_ids
         self.concurrency_aborts_everywhere: set[int] = set()
         self.t_ids_to_reschedule: set[int] = set()
+        self.fallback_rescheduled_t_ids: set[int] = set()
 
         # ready_to_commit_events -> worker_id: Event that appears if the peer is ready to commit
         self.ready_to_reorder_events: dict[int, asyncio.Event] = {peer_id: asyncio.Event() for peer_id in self.peers}
@@ -125,16 +127,17 @@ class AriaProtocol(BaseTransactionalProtocol):
             worker_id=self.id,
             kafka_url=KAFKA_URL,
             sequence_max_size=SEQUENCE_MAX_SIZE,
-            epoch_interval_ms=EPOCH_INTERVAL_MS,
+            epoch_interval_ms=100,
         )
 
         self.egress: StyxKafkaBatchEgress = StyxKafkaBatchEgress(
             output_offsets,
-            restart_after_recovery,
+            restart_after_recovery or restart_after_migration,
         )
         # Primary task used for processing
         self.function_scheduler_task: asyncio.Task | None = None
         self.communication_task: asyncio.Task | None = None
+        self.migration_sender_task: asyncio.Task | None = None
 
         self.max_t_counter: int = -1
         self.total_processed_seq_size: int = -1
@@ -233,9 +236,13 @@ class AriaProtocol(BaseTransactionalProtocol):
         await self.snapshotting_networking_manager.close_all_connections()
         self.function_scheduler_task.cancel()
         self.communication_task.cancel()
+        if self.migration_sender_task is not None:
+            self.migration_sender_task.cancel()
         try:
             await self.function_scheduler_task
             await self.communication_task
+            if self.migration_sender_task is not None:
+                await self.migration_sender_task
         except asyncio.CancelledError:
             logging.warning("Protocol coroutines stopped")
         logging.info(f"Active tasks: {asyncio.all_tasks()}")
@@ -255,7 +262,11 @@ class AriaProtocol(BaseTransactionalProtocol):
         self.function_scheduler_task.add_done_callback(self._task_exception_handler)
         self.communication_task = asyncio.create_task(self.communication_protocol())
         self.communication_task.add_done_callback(self._task_exception_handler)
-        logging.warning(f"Aria protocol started with operator partitions: {list(self.registered_operators.keys())}")
+        if self.migrating_state and USE_ASYNC_MIGRATION:
+            self.migration_sender_task = asyncio.create_task(self._continuous_migration_sender())
+        logging.warning(
+            f"Aria protocol started with operator partitions: {list(self.registered_operators.keys())}",
+        )
 
     async def run_function(
         self,
@@ -372,9 +383,9 @@ class AriaProtocol(BaseTransactionalProtocol):
                 params,
             ) = self.networking.decode_message(data)
 
-            #logging.warning(
+            # logging.warning(
             #    f"Aria WrongPartitionRequest: {key}:{operator_name}:{kafka_ingress_partition}, partition: {partition}",
-            #)
+            # )
 
             payload = RunFuncPayload(
                 request_id=request_id,
@@ -477,6 +488,7 @@ class AriaProtocol(BaseTransactionalProtocol):
     async def _handle_remote_wants_to_proceed(self, _: bytes) -> None:
         if not self.currently_processing:
             self.remote_wants_to_proceed = True
+            self.ingress.messages_available.set()
 
     async def _handle_async_migration(self, data: bytes) -> None:
         mt = MessageType.AsyncMigration
@@ -487,6 +499,12 @@ class AriaProtocol(BaseTransactionalProtocol):
 
         async with self.networking_locks[mt]:
             self.local_state.set_batch_data_from_migration(operator_partition, batch)
+            # Unblock any transactions waiting for these keys via RequestRemoteKey
+            op = tuple(operator_partition)
+            if op in self.networking.wait_remote_key_event:
+                for key in batch:
+                    if key in self.networking.wait_remote_key_event.get(op, {}):
+                        self.networking.wait_remote_key_event[op][key][0].set()
 
     async def _write_to_wal(self, sequence: list[SequencedItem]) -> tuple[float, float]:
         start_wal = timer()
@@ -504,45 +522,94 @@ class AriaProtocol(BaseTransactionalProtocol):
         )
         return start_wal, end_wal
 
-    async def send_async_migrate_batch(self) -> None:
-        if USE_ASYNC_MIGRATION and self.local_state.has_keys_to_send():
-            batch = self.local_state.get_async_migrate_batch(ASYNC_MIGRATION_BATCH_SIZE)
-            logging.debug(f"ASYNC_MIGRATION | Sending batch for migration: {batch}")
-            for operator_partition, k_v_pairs in batch.items():
-                operator_name, partition = operator_partition
-                worker = self.dns[operator_name][partition]
-                is_local = self.networking.in_the_same_network(worker[0], worker[2])
-                logging.debug(f"Is local: {is_local}")
-                if is_local:
-                    logging.debug(
-                        f"ASYNC_MIGRATION | Local transfer to {operator_partition} | "
-                        f"{len(k_v_pairs)} keys: {k_v_pairs.keys()}"
+    async def _send_migration_batch(
+        self,
+        batch: dict,
+    ) -> None:
+        """Send a migration batch to destination workers in parallel."""
+        send_tasks = []
+        logging.info(f"MIGRATION | Sending batch for migration: {batch}")
+        for operator_partition, k_v_pairs in batch.items():
+            operator_name, partition = operator_partition
+            worker = self.dns[operator_name][partition]
+            if self.networking.in_the_same_network(worker[0], worker[2]):
+                async with self.networking_locks[MessageType.AsyncMigration]:
+                    self.local_state.set_batch_data_from_migration(
+                        operator_partition,
+                        k_v_pairs,
                     )
-                    async with self.networking_locks[MessageType.AsyncMigration]:
-                        self.local_state.set_batch_data_from_migration(
-                            operator_partition,
-                            k_v_pairs,
-                        )
-                else:
-                    logging.debug(
-                        f"ASYNC_MIGRATION | Remote transfer to worker {worker} partition {operator_partition} | "
-                        f"{len(k_v_pairs)}"
-                    )
-                    await self.networking.send_message(
+                    op = tuple(operator_partition)
+                    if op in self.networking.wait_remote_key_event:
+                        for key in k_v_pairs:
+                            if key in self.networking.wait_remote_key_event.get(op, {}):
+                                self.networking.wait_remote_key_event[op][key][0].set()
+            else:
+                send_tasks.append(
+                    self.networking.send_message(
                         worker[0],
                         worker[2],
                         msg=(operator_partition, k_v_pairs),
                         msg_type=MessageType.AsyncMigration,
                         serializer=Serializer.MSGPACK,
-                    )
+                    ),
+                )
+        if send_tasks:
+            await asyncio.gather(*send_tasks)
+
+    async def _continuous_migration_sender(self) -> None:
+        """Background coroutine that continuously sends migration batches
+        independently of epoch barriers, completing migration faster.
+
+        Completion is based only on keys_remaining_to_send() — the coordinator's
+        global barrier (all workers report MigrationDone) ensures all data is
+        fully transferred.  We do NOT check keys_remaining_to_remote() because
+        hash metadata from other workers may not have arrived yet.
+        """
+        logging.warning("MIGRATION | Continuous migration sender started")
+        try:
+            while self.migrating_state:
+                if not self.local_state.has_keys_to_send():
+                    if self.local_state.keys_remaining_to_send() == 0:
+                        self.migrating_state = False
+                        await self.networking.send_message(
+                            DISCOVERY_HOST,
+                            DISCOVERY_PORT + 1,
+                            msg=b"",
+                            msg_type=MessageType.MigrationDone,
+                            serializer=Serializer.NONE,
+                        )
+                        logging.warning(
+                            f"MIGRATION_FINISHED at epoch: {self.sequencer.epoch_counter}"
+                            f" at time: {time.time_ns() // 1_000_000}",
+                        )
+                        self.local_state.log_state_summary(self.id, context="MIGRATION COMPLETE (async transfer done)")
+                        return
+                    # keys_to_send dict is empty but keys_remaining_to_send > 0
+                    # shouldn't normally happen, but yield and retry
+                    await asyncio.sleep(0.01)
+                    continue
+
+                batch = self.local_state.get_async_migrate_batch(ASYNC_MIGRATION_BATCH_SIZE)
+                await self._send_migration_batch(batch)
+                # Yield to event loop between batches
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            logging.warning("MIGRATION | Continuous migration sender cancelled")
+            raise
 
     async def function_scheduler(self) -> None:
         await self.started.wait()
         logging.warning("STARTED function scheduler")
 
         while self.running:
-            # need to sleep to allow the kafka consumer coroutine to read data
-            await asyncio.sleep(0)
+            # Wait until the ingress signals that messages are available,
+            # or a remote peer wants to proceed, instead of busy-spinning.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self.ingress.messages_available.wait(),
+                    timeout=0.1,
+                )
+            self.ingress.messages_available.clear()
 
             async with self.sequencer.lock:
                 sequence: list[SequencedItem] = self.sequencer.get_epoch()
@@ -630,8 +697,6 @@ class AriaProtocol(BaseTransactionalProtocol):
         snap_end = timer()
 
         epoch_end = timer()
-
-        await self._maybe_finish_async_migration()
 
         # Transaction count metrics for this epoch
         total_txns = len(sequence)
@@ -733,6 +798,7 @@ class AriaProtocol(BaseTransactionalProtocol):
     and the partition is not the same as the new partition, the transaction needs to be redirected
     to the new partition decided by the previous migration.
     """
+
     async def _redirect_migration_backlog_transactions(self, sequence: list[SequencedItem]) -> list[SequencedItem]:
         sequence_to_process = []
         for seq_item in sequence:
@@ -892,7 +958,6 @@ class AriaProtocol(BaseTransactionalProtocol):
                 len(sequence),
             ),
             serializer=Serializer.PICKLE,
-            send_async_migration_message=True,
         )
         self.phase_resource_tracker.end("SYNC")
         end = timer()
@@ -949,9 +1014,9 @@ class AriaProtocol(BaseTransactionalProtocol):
             await self.send_delta_to_snapshotting_proc()
             logging.debug("FALLBACK_AFTER_DELTA")
             self.concurrency_aborts_everywhere = set()
-            self.t_ids_to_reschedule = set()
-        else:
-            logging.warning("FALLBACK_SKIPPED")
+            # Keep rescheduled t_ids (rw-set changed during fallback) for the next epoch
+            self.t_ids_to_reschedule = self.fallback_rescheduled_t_ids.copy()
+            self.fallback_rescheduled_t_ids.clear()
         return abort_rate, committed_fallback
 
     def _advance_offsets(self, sequence: list[SequencedItem]) -> None:
@@ -970,32 +1035,6 @@ class AriaProtocol(BaseTransactionalProtocol):
             else:
                 self.topic_partition_offsets[tpo_key] = max(payload.kafka_offset, prev)
         logging.debug(f"Partition requests: {partition_reqs}")
-
-    async def _maybe_finish_async_migration(self) -> None:
-        if not (self.migrating_state and USE_ASYNC_MIGRATION):
-            return
-
-        migration_progress = self.local_state.keys_remaining_to_send()
-        keys_to_receive = self.local_state.keys_remaining_to_remote()
-        logging.warning(
-            f"MIGRATION_PROGRESS | Worker {self.id} | Epoch {self.sequencer.epoch_counter} | "
-            f"Keys to send: {migration_progress} | Keys to receive: {keys_to_receive}"
-        )
-        if migration_progress != 0:
-            return
-
-        self.migrating_state = False
-        await self.networking.send_message(
-            DISCOVERY_HOST,
-            DISCOVERY_PORT + 1,
-            msg=b"",
-            msg_type=MessageType.MigrationDone,
-            serializer=Serializer.NONE,
-        )
-        logging.warning(
-            f"MIGRATION_FINISHED at epoch: {self.sequencer.epoch_counter} at time: {time.time_ns() // 1_000_000}",
-        )
-        self.local_state.log_state_summary(self.id, context="MIGRATION COMPLETE (async transfer done)")
 
     async def _sync_cleanup(
         self,
@@ -1022,6 +1061,7 @@ class AriaProtocol(BaseTransactionalProtocol):
     def cleanup_after_epoch(self) -> None:
         self.concurrency_aborts_everywhere.clear()
         self.t_ids_to_reschedule.clear()
+        self.fallback_rescheduled_t_ids.clear()
         self.wait_responses_to_be_sent.clear()
         self.networking.cleanup_after_epoch()
         self.local_state.cleanup()
@@ -1063,8 +1103,15 @@ class AriaProtocol(BaseTransactionalProtocol):
                 await self.networking.waited_ack_events[t_id].wait()
             transaction_failed: bool = t_id in self.networking.aborted_events or not success
 
-            if not transaction_failed:
+            # Per the Aria paper: if the rw-set changed during fallback
+            # re-execution, the dependency graph is invalid — reschedule
+            # the transaction to the next epoch instead of committing.
+            rw_changed = self.local_state.has_fallback_rw_set_changed(t_id)
+            if not transaction_failed and not rw_changed:
                 self.local_state.commit_fallback_transaction(t_id)
+            elif rw_changed:
+                self.fallback_rescheduled_t_ids.add(t_id)
+                transaction_failed = True
 
             await self.fallback_unlock(t_id, success=not transaction_failed)
 
@@ -1138,7 +1185,6 @@ class AriaProtocol(BaseTransactionalProtocol):
             msg_type=MessageType.AriaFallbackStart,
             message=(self.id,),
             serializer=Serializer.MSGPACK,
-            send_async_migration_message=True,
         )
         logging.debug("FALLBACK_SYNC_START_DONE")
         if fallback_tasks:
@@ -1152,7 +1198,6 @@ class AriaProtocol(BaseTransactionalProtocol):
             msg_type=MessageType.AriaFallbackDone,
             message=(self.id,),
             serializer=Serializer.MSGPACK,
-            send_async_migration_message=True,
         )
         logging.debug("FALLBACK_SYNC_DONE_DONE")
 
@@ -1215,7 +1260,6 @@ class AriaProtocol(BaseTransactionalProtocol):
         msg_type: MessageType,
         message: tuple | bytes,
         serializer: Serializer = Serializer.MSGPACK,
-        send_async_migration_message: bool = False,
     ) -> None:
         await self.networking.send_message(
             DISCOVERY_HOST,
@@ -1224,7 +1268,5 @@ class AriaProtocol(BaseTransactionalProtocol):
             msg_type=msg_type,
             serializer=serializer,
         )
-        if send_async_migration_message:
-            await self.send_async_migrate_batch()
         await self.sync_workers_event[msg_type].wait()
         self.sync_workers_event[msg_type].clear()

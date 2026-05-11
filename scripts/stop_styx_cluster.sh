@@ -13,7 +13,7 @@ for cid in $(docker compose ps -a -q worker 2>/dev/null); do
   docker logs "$cid" 2>&1 | grep -v '|[[:space:]]*$' > "logs/${cname}-logs-${TS}.log"
 done
 docker compose logs coordinator > "logs/coordinator-logs-${TS}.log"
-for cid in $(docker compose ps -q worker-standby 2>/dev/null); do
+for cid in $(docker compose ps -a -q worker-standby 2>/dev/null); do
   cname=$(docker inspect --format '{{.Name}}' "$cid" | sed 's|^/||')
   docker logs "$cid" 2>&1 | grep -v '|[[:space:]]*$' > "logs/${cname}-logs-${TS}.log"
 done

@@ -206,7 +206,7 @@ class TestSyncClientSubmitDataflow:
             c.submit_dataflow(graph)
 
         mock_socket.connect.assert_called_once_with(("localhost", 8888))
-        mock_socket.send.assert_called_once()
+        mock_socket.sendall.assert_called_once()
         mock_socket.close.assert_called_once()
         assert c.graph_known_event.is_set()
 
@@ -221,7 +221,7 @@ class TestSyncClientUpdateDataflow:
             c.update_dataflow(graph)
 
         mock_socket.connect.assert_called_once_with(("localhost", 8888))
-        mock_socket.send.assert_called_once()
+        mock_socket.sendall.assert_called_once()
         mock_socket.close.assert_called_once()
 
 
@@ -234,7 +234,7 @@ class TestSyncClientNotifyInitDataComplete:
             c.notify_init_data_complete()
 
         mock_socket.connect.assert_called_once()
-        mock_socket.send.assert_called_once()
+        mock_socket.sendall.assert_called_once()
         mock_socket.close.assert_called_once()
 
 

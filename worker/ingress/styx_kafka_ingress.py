@@ -44,6 +44,7 @@ class StyxKafkaIngress(BaseIngress):
         self.send_message_tasks: list[typing.Coroutine] = []
 
         self.started: asyncio.Event = asyncio.Event()
+        self.messages_available: asyncio.Event = asyncio.Event()
 
         self.kafka_consumer: AIOKafkaConsumer | None = None
         self.kafka_ingress_task: asyncio.Task | None = None
@@ -132,8 +133,9 @@ class StyxKafkaIngress(BaseIngress):
                         operator_name=operator_name,
                         partition=true_partition,
                         function_name=fun_name,
+                        kafka_offset=msg.offset,
                         params=params,
-                        kafka_ingress_partition=partition,
+                        kafka_ingress_partition=msg.partition,
                     )
                     self.sequencer.sequence(run_func_payload)
                     self.epoch_stats["sequenced"] += 1
@@ -199,18 +201,23 @@ class StyxKafkaIngress(BaseIngress):
             )
             self.started.set()
             while True:
-                async with self.sequencer.lock:
-                    result = await self.kafka_consumer.getmany(
-                        timeout_ms=self.epoch_interval_ms,
-                        max_records=self.sequence_max_size,
-                    )
-                    for messages in result.values():
-                        if messages:
-                            s_messages = sorted(messages, key=lambda msg: msg.offset)
-                            for message in s_messages:
-                                self.handle_message_from_kafka(message)
-                    if self.send_message_tasks:
-                        await asyncio.gather(*self.send_message_tasks)
-                        self.send_message_tasks = []
+                # Poll Kafka WITHOUT holding the sequencer lock so the epoch
+                # loop is not blocked while we wait for messages.
+                result = await self.kafka_consumer.getmany(
+                    timeout_ms=self.epoch_interval_ms,
+                    max_records=self.sequence_max_size,
+                )
+                has_messages = any(result.values())
+                if has_messages:
+                    async with self.sequencer.lock:
+                        for messages in result.values():
+                            if messages:
+                                s_messages = sorted(messages, key=lambda msg: msg.offset)
+                                for message in s_messages:
+                                    self.handle_message_from_kafka(message)
+                        if self.send_message_tasks:
+                            await asyncio.gather(*self.send_message_tasks)
+                            self.send_message_tasks = []
+                    self.messages_available.set()
         finally:
             await self.kafka_consumer.stop()

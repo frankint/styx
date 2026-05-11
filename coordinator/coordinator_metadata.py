@@ -222,13 +222,17 @@ class Coordinator:
             return min(self.worker_snapshot_ids.values())
         return -1
 
-    async def update_stateflow_graph(self, new_stateflow_graph: StateflowGraph) -> None:
+    async def update_stateflow_graph(
+        self,
+        new_stateflow_graph: StateflowGraph,
+        *,
+        include_all_live: bool = False,
+    ) -> None:
         if not isinstance(new_stateflow_graph, StateflowGraph):
             raise NotAStateflowGraphError
         # TODO the cluster was balanced by the previous deployment, if the graph is complex it might be
         #  unbalanced after the update
 
-        # Update max parallelism
         self.max_operator_parallelism = new_stateflow_graph.max_operator_parallelism
 
         for _, operator in iter(new_stateflow_graph):
@@ -243,20 +247,29 @@ class Coordinator:
                 )
         worker_assignments = self.worker_pool.get_worker_assignments()
         logging.warning(f"WORKER ASSIGNMENTS: {worker_assignments}")
+
+        if include_all_live:
+            targets = self.worker_pool.get_live_workers()
+        else:
+            targets = self.worker_pool.get_participating_workers()
+
         tasks = [
             self.networking.send_message(
                 worker.worker_ip,
                 worker.worker_port,
                 msg=(
                     new_stateflow_graph,
-                    worker_assignments[(worker.worker_ip, worker.worker_port, worker.protocol_port)],
+                    worker_assignments.get(
+                        (worker.worker_ip, worker.worker_port, worker.protocol_port),
+                        {},
+                    ),
                     self.worker_pool.get_operator_partition_locations(),
                     self.worker_pool.get_workers(),
                     new_stateflow_graph.operator_state_backend,
                 ),
                 msg_type=MessageType.InitMigration,
             )
-            for worker in self.worker_pool.get_participating_workers()
+            for worker in targets
         ]
         await asyncio.gather(*tasks)
         self.submitted_graph = new_stateflow_graph
@@ -358,9 +371,7 @@ class Coordinator:
             f"snapshot_id={snap_id}"
         )
 
-    async def expand_kafka_topic_partitions(
-        self, stateflow_graph: StateflowGraph, new_partition_count: int
-    ) -> None:
+    async def expand_kafka_topic_partitions(self, stateflow_graph: StateflowGraph, new_partition_count: int) -> None:
         """Expand existing Kafka topics to have more partitions for scale-up."""
         if KAFKA_URL is None:
             logging.error("Kafka URL not given")

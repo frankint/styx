@@ -1,6 +1,8 @@
 tests
 styx-package/styx.egg-info
 styx-package/build
+results
+logs
 
 **/__pycache__
 **/*.pyc

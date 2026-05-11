@@ -2,10 +2,15 @@ from collections import defaultdict
 import traceback
 from typing import TYPE_CHECKING
 
-from msgspec import msgpack
 from styx.common.logging import logging
 
+from worker.operator_state.aria._aria_state import (
+    commit as _cy_commit,
+    state_get as _cy_state_get,
+    state_get_immediate as _cy_state_get_immediate,
+)
 from worker.operator_state.aria.base_aria_state import BaseAriaState
+from worker.operator_state.aria.fast_copy import fast_deepcopy
 
 if TYPE_CHECKING:
     from styx.common.types import K, KVPairs, OperatorPartition, V
@@ -51,12 +56,19 @@ class InMemoryOperatorState(BaseAriaState):
         new_operator_partition: OperatorPartition,
         key: K,
         old_partition: int,
-    ) -> K:
+    ) -> K | None:
         operator_name, new_partition = new_operator_partition
         operator_partition: OperatorPartition = (operator_name, old_partition)
-        data_to_send: K = self.data[operator_partition].pop(key)
-        self.keys_to_send[operator_partition].remove((key, new_partition))
+        if operator_partition not in self.data:
+            return None
+        data_to_send = self.data[operator_partition].pop(key, None)
         self.keys_sent[key] = new_partition
+
+        if data_to_send is None:
+            # Key was already transferred via async migration batch
+            return None
+        if operator_partition in self.keys_to_send:
+            self.keys_to_send[operator_partition].discard((key, new_partition))
         return data_to_send
 
     def set_data_from_migration(
@@ -66,14 +78,17 @@ class InMemoryOperatorState(BaseAriaState):
         data: KVPairs,
     ) -> None:
         operator_partition = tuple(operator_partition)
-        if operator_partition not in self.data:
-            self.add_new_operator_partition(operator_partition)
-        self.data[operator_partition][key] = data
-        # Only remove from remote_keys if the key exists there
-        if operator_partition in self.remote_keys and key in self.remote_keys[operator_partition]:
-            del self.remote_keys[operator_partition][key]
-            if not self.remote_keys[operator_partition]:
-                del self.remote_keys[operator_partition]
+        if data is not None:
+            if operator_partition not in self.data:
+                self.add_new_operator_partition(operator_partition)
+            self.data[operator_partition][key] = data
+            # Only remove from remote_keys if the key exists there
+            # A None response means the async migration batch already transferred
+            # this key — the batch will arrive and set it via set_batch_data_from_migration
+            if operator_partition in self.remote_keys and key in self.remote_keys[operator_partition]:
+                del self.remote_keys[operator_partition][key]
+                if not self.remote_keys[operator_partition]:
+                    del self.remote_keys[operator_partition]
 
     def migrate_within_the_same_worker(
         self,
@@ -81,13 +96,26 @@ class InMemoryOperatorState(BaseAriaState):
         new_partition: int,
         key: K,
         old_partition: int,
-    ) -> None:
+    ) -> bool:
+        """Move a key between partitions on the same worker.
+        Returns True if the key data is now available in the new partition,
+        False if the async migration batch already popped it but hasn't
+        delivered it yet (caller must wait).
+        """
         new_operator_partition: OperatorPartition = (operator_name, new_partition)
-        self.set_data_from_migration(
-            new_operator_partition,
-            key,
-            self.get_key_to_migrate(new_operator_partition, key, old_partition),
-        )
+        data = self.get_key_to_migrate(new_operator_partition, key, old_partition)
+        if data is not None:
+            self.set_data_from_migration(new_operator_partition, key, data)
+            return True
+        # Key was already popped by async batch. Check if batch already
+        # delivered it to the new partition.
+        if key in self.data.get(new_operator_partition, {}):
+            if new_operator_partition in self.remote_keys and key in self.remote_keys[new_operator_partition]:
+                del self.remote_keys[new_operator_partition][key]
+                if not self.remote_keys[new_operator_partition]:
+                    del self.remote_keys[new_operator_partition]
+            return True
+        return False
 
     def keys_remaining_to_remote(self) -> int:
         c = 0
@@ -134,13 +162,16 @@ class InMemoryOperatorState(BaseAriaState):
         batch_to_send: dict[OperatorPartition, KVPairs] = defaultdict(dict)
         c = 0
         operator_partitions_to_clear = []
-        #logging.warning(f"ASYNC_MIGRATION | Batch size {batch_size}, keys_to_send: {self.keys_to_send}")
+        # logging.warning(f"ASYNC_MIGRATION | Batch size {batch_size}, keys_to_send: {self.keys_to_send}")
         for operator_partition, keys in self.keys_to_send.items():
             operator_name, _ = operator_partition
             while keys and c < batch_size:
                 key, new_partition = keys.pop()
-                value = self.data[operator_partition].pop(key)
+                value = self.data[operator_partition].pop(key, None)
                 self.keys_sent[key] = new_partition
+                if value is None:
+                    # Key was deleted between rehash and transfer — skip it
+                    continue
                 batch_to_send[(operator_name, new_partition)][key] = value
                 c += 1
             if not keys:
@@ -166,10 +197,13 @@ class InMemoryOperatorState(BaseAriaState):
         if operator_partition not in self.data:
             self.add_new_operator_partition(operator_partition)
         self.data[operator_partition].update(kv_pairs)
-        for key in kv_pairs:
-            del self.remote_keys[operator_partition][key]
-        if not self.remote_keys[operator_partition]:
-            del self.remote_keys[operator_partition]
+        # Guard: remote_keys may not have entries if async batch arrived
+        # before hash metadata, or entries were already removed.
+        if operator_partition in self.remote_keys:
+            for key in kv_pairs:
+                self.remote_keys[operator_partition].pop(key, None)
+            if not self.remote_keys[operator_partition]:
+                del self.remote_keys[operator_partition]
 
     def get_worker_id_old_partition(
         self,
@@ -267,7 +301,7 @@ class InMemoryOperatorState(BaseAriaState):
         operator_partition: OperatorPartition = (operator_name, partition)
         for key in self.data[operator_partition]:
             self.deal_with_reads(key, t_id, operator_partition)
-        return msgpack.decode(msgpack.encode(self.data[operator_partition]))
+        return fast_deepcopy(self.data[operator_partition])
 
     def batch_insert(self, kv_pairs: dict, operator_name: str, partition: int) -> None:
         operator_partition: OperatorPartition = (operator_name, partition)
@@ -275,28 +309,27 @@ class InMemoryOperatorState(BaseAriaState):
         self.delta_map[operator_partition].update(kv_pairs)
 
     def get(self, key: K, t_id: int, operator_name: str, partition: int) -> V:
-        operator_partition: OperatorPartition = (operator_name, partition)
-        self.deal_with_reads(key, t_id, operator_partition)
-        # if transaction wrote to this key, read from the write set
-        if t_id in self.write_sets[operator_partition] and key in self.write_sets[operator_partition][t_id]:
-            return msgpack.decode(
-                msgpack.encode(self.write_sets[operator_partition][t_id][key]),
-            )
-        return msgpack.decode(msgpack.encode(self.data[operator_partition].get(key)))
+        return _cy_state_get(
+            self.data,
+            self.write_sets,
+            self.reads,
+            self.read_sets,
+            key,
+            t_id,
+            operator_name,
+            partition,
+        )
 
     def get_immediate(self, key: K, t_id: int, operator_name: str, partition: int) -> V:
-        operator_partition: OperatorPartition = (operator_name, partition)
-        if (
-            t_id in self.fallback_commit_buffer
-            and operator_partition in self.fallback_commit_buffer[t_id]
-            and key in self.fallback_commit_buffer[t_id][operator_partition]
-        ):
-            return msgpack.decode(
-                msgpack.encode(
-                    self.fallback_commit_buffer[t_id][operator_partition][key],
-                ),
-            )
-        return msgpack.decode(msgpack.encode(self.data[operator_partition].get(key)))
+        return _cy_state_get_immediate(
+            self.data,
+            self.fallback_commit_buffer,
+            key,
+            t_id,
+            operator_name,
+            partition,
+            self.fallback_read_sets,
+        )
 
     def delete(self, key: K, operator_name: str, partition: int) -> None:
         # Need to find a way to implement deletes
@@ -310,24 +343,18 @@ class InMemoryOperatorState(BaseAriaState):
         operator_partition: OperatorPartition = (operator_name, partition)
         if operator_partition not in self.data:
             return False
-        return (
-            operator_partition in self.keys_to_send
-            and key not in self.keys_to_send[operator_partition]
-            and key in self.data[operator_partition]
-        ) or self.in_remote_keys(key, operator_name, partition)
+        if key in self.data[operator_partition]:
+            # During migration: a key still in data but pending send to another
+            # partition should not be considered as belonging here.
+            if operator_partition in self.keys_to_send:
+                return not any(k == key for k, _ in self.keys_to_send[operator_partition])
+            return True
+        # During migration: key is expected to arrive from a remote worker
+        return self.in_remote_keys(key, operator_name, partition)
 
     def commit(self, aborted_from_remote: set[int]) -> set[int]:
-        committed_t_ids = set()
         try:
-            for operator_name in self.write_sets:
-                updates_to_commit = {}
-                for t_id, ws in self.write_sets[operator_name].items():
-                    if t_id not in aborted_from_remote:
-                        updates_to_commit.update(ws)
-                        committed_t_ids.add(t_id)
-                self.data[operator_name].update(updates_to_commit)
-                self.delta_map[operator_name].update(updates_to_commit)
+            return _cy_commit(self.write_sets, self.data, self.delta_map, aborted_from_remote)
         except Exception as e:
             logging.warning(traceback.format_exc())
             raise e
-        return committed_t_ids

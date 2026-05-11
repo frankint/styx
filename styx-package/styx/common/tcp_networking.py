@@ -74,10 +74,20 @@ class StyxSocketClient:
             while i < self.n_retries:
                 try:
                     if self.writer is None:
-                        raise ConnectionError("Connection lost and reconnection failed")
+                        msg = "Connection lost and reconnection failed"
+                        logging.error(msg)
+                        continue
                     self.writer.write(message)
                     await self.writer.drain()
-                except (OSError, RuntimeError, ConnectionResetError, BrokenPipeError, ConnectionError, AttributeError, TypeError):
+                except (
+                    OSError,
+                    RuntimeError,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                    ConnectionError,
+                    AttributeError,
+                    TypeError,
+                ):
                     logging.warning(
                         f"Broken connection in send_message, close the old ones and retry. "
                         f"Attempt {i} at {self.target_host}:{self.target_port}",
@@ -109,12 +119,22 @@ class StyxSocketClient:
             while i < self.n_retries:
                 try:
                     if self.writer is None or self.reader is None:
-                        raise ConnectionError("Connection lost and reconnection failed")
+                        msg = "Connection lost and reconnection failed"
+                        logging.error(msg)
+                        continue
                     self.writer.write(message)
                     await self.writer.drain()
                     (size,) = unpack(">Q", await self.reader.readexactly(8))
                     resp = await self.reader.readexactly(size)
-                except (OSError, RuntimeError, ConnectionResetError, BrokenPipeError, ConnectionError, AttributeError, TypeError):
+                except (
+                    OSError,
+                    RuntimeError,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                    ConnectionError,
+                    AttributeError,
+                    TypeError,
+                ):
                     logging.warning(
                         f"Broken connection in rq-rs, close the old ones and retry. "
                         f"Attempt {i} at {self.target_host}:{self.target_port}",
@@ -174,7 +194,8 @@ class SocketPool:
 
     def __next__(self) -> StyxSocketClient:
         if not self.conns:
-            raise StopIteration("No connections available in pool")
+            msg = "No connections available in pool"
+            raise StopIteration(msg)
         conn = self.conns[self.index]
         next_idx = self.index + 1
         self.index = 0 if next_idx >= len(self.conns) else next_idx
@@ -231,7 +252,8 @@ class NetworkingManager(BaseNetworking):
         )
         await pool.create_socket_connections()
         if not pool.conns:
-            raise ConnectionError(f"Failed to establish any connections to {host}:{port}")
+            msg = f"Failed to establish any connections to {host}:{port}"
+            raise ConnectionError(msg)
         self.pools[(host, port)] = pool
 
     async def send_message(

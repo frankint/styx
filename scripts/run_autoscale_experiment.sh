@@ -172,5 +172,5 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
     bash scripts/uninstall_styx_cluster_with_helm.sh
 else
     #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
-    docker compose stop coordinator worker 
+    docker compose stop coordinator worker worker-standby
 fi

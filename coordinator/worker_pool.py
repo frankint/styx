@@ -1,5 +1,6 @@
 import asyncio
 from collections import defaultdict, deque
+from copy import deepcopy
 from dataclasses import dataclass
 import heapq
 import os
@@ -10,6 +11,7 @@ from styx.common.logging import logging
 if TYPE_CHECKING:
     from styx.common.base_operator import BaseOperator
     from styx.common.operator import Operator
+    from styx.common.stateflow_graph import StateflowGraph
     from styx.common.types import OperatorPartition
 
 HEARTBEAT_LIMIT: int = int(os.getenv("HEARTBEAT_LIMIT", "5000"))  # 5000ms
@@ -172,10 +174,9 @@ class WorkerPool:
         """Add an operator partition using RoundRobin"""
         worker: Worker | None = self.pop()
         if worker is None:
-            raise RuntimeError(
-                f"Cannot schedule operator partition {operator_partition}: no workers available in the pool. "
-                "Ensure at least one worker has registered before submitting the execution graph."
-            )
+            msg = f"""Cannot schedule operator partition {operator_partition}: no workers available in the pool. """
+            logging.error(msg)
+            return
         self.operator_partition_to_worker[operator_partition] = worker.worker_id
         worker.assigned_operators[operator_partition] = operator
         self.put(worker)
@@ -219,15 +220,13 @@ class WorkerPool:
         return worker
 
     def activate_standby_worker(self, current_time: float | None = None) -> Worker:
-        """Activate a standby worker and move it to the active pool """
+        """Activate a standby worker and move it to the active pool"""
         if not self._standby_queue:
             return None
         worker: Worker = self._standby_queue.popleft()
         self.standby_worker_ids.remove(worker.worker_id)
         # Set previous_heartbeat to current time so the newly activated worker
-        # has a grace period before failing heartbeat checks. Without this,
-        # the default value (1_000_000.0) may be too far in the past if the
-        # coordinator has been running for a while (timer() > 1_000_000).
+        # has a grace period before failing heartbeat checks.
         if current_time is not None:
             worker.previous_heartbeat = current_time
         self.put(worker)
@@ -262,6 +261,49 @@ class WorkerPool:
 
     def number_of_workers(self) -> int:
         return len(self._queue)
+
+    def reschedule_excluding(
+        self,
+        exclude_ids: set[int],
+        stateflow_graph: StateflowGraph,
+    ) -> None:
+        """Reassign all operator partitions round-robin across live workers NOT in exclude_ids"""
+        all_live = sorted(self.get_live_workers(), key=lambda w: w.worker_id)
+        survivors = [w for w in all_live if w.worker_id not in exclude_ids]
+        if not survivors:
+            logging.error("Reschedule excluding: no surviving workers - nothing to schedule")
+            return
+
+        # Clear all assignments for every live worker (including victims)
+        for w in all_live:
+            w.assigned_operators = {}
+        self.operator_partition_to_worker.clear()
+        self.orphaned_operator_assignments.clear()
+
+        # Rebuild the heap with ALL live workers (victims stay live for migration)
+        self._queue = []
+        self._worker_queue_idx = {}
+        self._index = 0
+        for w in all_live:
+            self.put(w)
+
+        # Round-robin only onto survivors
+        survivor_count = len(survivors)
+        idx = 0
+        for operator_name, operator in iter(stateflow_graph):
+            for partition in range(stateflow_graph.max_operator_parallelism):
+                operator_copy = deepcopy(operator)
+                if partition >= operator.n_partitions:
+                    operator_copy.make_shadow()
+                op_partition = (operator_name, partition)
+                target = survivors[idx % survivor_count]
+
+                # Remove-and-reinsert so heap priority stays correct
+                worker = self.remove_worker(target.worker_id)
+                worker.assigned_operators[op_partition] = operator_copy
+                self.operator_partition_to_worker[op_partition] = worker.worker_id
+                self.put(worker)
+                idx += 1
 
     def get_non_participating_workers(self) -> list[Worker]:
         return [worker for _, _, worker in self._queue if worker != self._tombstone and not worker.participating]

@@ -114,12 +114,13 @@ class StatefulFunction(Function):
                     ) in self.__state.operator_partitions and self.__networking.worker_id == old_worker_id
                     if is_local:
                         # Transfer the key from another partition within the same worker
-                        self.__state.migrate_within_the_same_worker(
+                        migration_ok = self.__state.migrate_within_the_same_worker(
                             self.__operator_name,
                             self.__partition,
                             self.__key,
                             old_partition,
                         )
+                        need_remote_fetch = not migration_ok
                     else:
                         # We'll do networking outside the lock.
                         need_remote_fetch = True

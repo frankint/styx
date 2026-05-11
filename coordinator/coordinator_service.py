@@ -7,11 +7,11 @@ import concurrent.futures
 import contextlib
 from copy import deepcopy
 from enum import Enum, auto
+from math import ceil
 import os
 import socket
 import struct
 import time
-from math import ceil
 from timeit import default_timer as timer
 from typing import TYPE_CHECKING
 
@@ -74,6 +74,29 @@ class RecoveryState(Enum):
 
 class CoordinatorService:
     def __init__(self) -> None:
+        self._init_networking_stack()
+        self._init_listen_sockets()
+        self._init_recovery_fields()
+        self._init_prometheus_metrics()
+        self._init_concurrency_and_handlers()
+        self._init_scaling_capacity_and_chronos()
+
+    @staticmethod
+    def _bind_listen_tcp_socket(port: int) -> socket.socket:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_LINGER,
+            struct.pack("ii", 1, 0),
+        )  # Enable LINGER, timeout 0
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        sock.bind(("0.0.0.0", port))  # noqa: S104
+        sock.setblocking(False)
+        return sock
+
+    def _init_networking_stack(self) -> None:
         self.networking = NetworkingManager(SERVER_PORT)
         self.protocol_networking = NetworkingManager(
             PROTOCOL_PORT,
@@ -90,47 +113,20 @@ class CoordinatorService:
         self.coordinator = Coordinator(self.networking, self.s3_client)
         self.aio_task_scheduler = AIOTaskScheduler()
         self.aio_task_scheduler_coord = AIOTaskScheduler()
-
         self.puller_task: asyncio.Task | None = None
 
-        self.coor_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.coor_socket.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_LINGER,
-            struct.pack("ii", 1, 0),
-        )  # Enable LINGER, timeout 0
-        self.coor_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.coor_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
-        self.coor_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-        self.coor_socket.bind(("0.0.0.0", SERVER_PORT))  # noqa: S104
-        self.coor_socket.setblocking(False)
+    def _init_listen_sockets(self) -> None:
+        self.coor_socket = self._bind_listen_tcp_socket(SERVER_PORT)
+        self.protocol_socket = self._bind_listen_tcp_socket(SERVER_PORT + 1)
 
-        self.protocol_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.protocol_socket.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_LINGER,
-            struct.pack("ii", 1, 0),
-        )  # Enable LINGER, timeout 0
-        self.protocol_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.protocol_socket.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_SNDBUF,
-            1024 * 1024,
-        )
-        self.protocol_socket.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_RCVBUF,
-            1024 * 1024,
-        )
-        self.protocol_socket.bind(("0.0.0.0", SERVER_PORT + 1))  # noqa: S104
-        self.protocol_socket.setblocking(False)
-
+    def _init_recovery_fields(self) -> None:
         self.aria_metadata: AriaSyncMetadata | None = None
         self.migration_metadata: MigrationMetadata | None = None
         self.workers_that_re_registered: list[Worker] = []
         self.recovery_lock: asyncio.Lock = asyncio.Lock()
         self.recovery_state: RecoveryState = RecoveryState.IDLE
 
+    def _init_prometheus_metrics(self) -> None:
         self.metrics_server = start_http_server(8000)
         self.live_worker_count_gauge = Gauge("live_worker_count", "Number of live workers registered with coordinator")
         self.cpu_usage_gauge = Gauge("worker_cpu_usage_percent", "CPU usage percentage", ["instance"])
@@ -234,6 +230,7 @@ class CoordinatorService:
 
         self.migration_in_progress: bool = False
 
+    def _init_concurrency_and_handlers(self) -> None:
         self.networking_locks: dict[MessageType, asyncio.Lock] = {
             MessageType.SendExecutionGraph: asyncio.Lock(),
             MessageType.UpdateExecutionGraph: asyncio.Lock(),
@@ -276,13 +273,17 @@ class CoordinatorService:
             MessageType.InitDataComplete: self._handle_init_data_complete,
         }
 
-        # Scaling policy parameters
+    def _init_scaling_capacity_and_chronos(self) -> None:
         self.enable_autoscale: bool = bool(strtobool(os.getenv("ENABLE_AUTOSCALE", "true")))
         self.scale_up_cpu_threshold: float = 70.0
         self.scale_cooldown_period: float = 15.0
         self.capacity_confidence_threshold: float = 0.25
-        self.downscale_safety_factor: float = 0.8
+        self.downscale_safety_factor: float = 0.95
         self._pending_downscale: bool = False
+        self._downscale_victim_ids: set[int] = set()
+        # Autoscale cooldown: `scale_cooldown_period` seconds after migration fully
+        # completes (MigrationDone barrier), not from scale_up/scale_down start — so long
+        # migrations still get a full quiet window once the cluster is stable.
         self.last_scale_action_time: float = 0.0
         self.scale_window_seconds: int = 5
         self.cpu_metric_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
@@ -310,23 +311,32 @@ class CoordinatorService:
         self.chronos_forecaster: ChronosForecaster | None = None
         self.forecaster_task: asyncio.Task | None = None
 
+    def _migration_workers(self) -> list:
+        """Workers that must participate in the current migration.
+        During a downscale, victims have zero assignments (not 'participating')
+        but still hold state and must hit every migration barrier.
+        """
+        if self._pending_downscale:
+            return self.coordinator.worker_pool.get_live_workers()
+        return self.coordinator.worker_pool.get_participating_workers()
+
     async def scale_up(self, new_n_partitions: int, new_worker_num: int) -> None:
         if self.migration_in_progress:
-            logging.warning("ManualScale requested but a migration is already in progress.")
+            logging.warning("Scale Up requested but a migration is already in progress.")
             return
         if not self.coordinator.graph_submitted or self.coordinator.submitted_graph is None:
-            logging.warning("ManualScale requested but no graph is currently submitted.")
+            logging.warning("Scale Up requested but no graph is currently submitted.")
             return
 
         if new_n_partitions <= 0:
-            logging.warning(f"ManualScale requested with invalid new_n_partitions={new_n_partitions}")
+            logging.warning(f"Scale Up requested with invalid new_n_partitions={new_n_partitions}")
             return
 
         # TODO: Decide how to handle this
         max_parallelism = 10  # int(os.getenv("MAX_OPERATOR_PARALLELISM", 10))
         if new_n_partitions > max_parallelism:
             logging.warning(
-                f"ManualScale requested with new_n_partitions={new_n_partitions} "
+                f"Scale Up requested with new_n_partitions={new_n_partitions} "
                 f"but MAX_OPERATOR_PARALLELISM={max_parallelism}"
             )
             return
@@ -335,7 +345,7 @@ class CoordinatorService:
         # Ensure we never reduce partitions below the current count (Kafka can't shrink partitions)
         current_partitions = self.coordinator.submitted_graph.max_operator_parallelism
         effective_n_partitions = max(new_n_partitions, current_partitions)
-        
+
         new_graph = deepcopy(self.coordinator.submitted_graph)
         new_graph.max_operator_parallelism = effective_n_partitions
         for _op_name, op in iter(new_graph):
@@ -345,13 +355,12 @@ class CoordinatorService:
             else:
                 op.n_partitions = effective_n_partitions
 
-        # 2) Gracefully stop the transactional protocol in the next epoch
+        # 2) Mark migration in progress and stop snapshotting.
+        #    Protocol stop is deferred to finalize_migration_repartition().
         self.migration_in_progress = True
         await self.stop_snapshotting()
-        if self.aria_metadata is not None:
-            self.aria_metadata.stop_in_next_epoch()
 
-        # 3) Activate the new workers 
+        # 3) Activate the new workers
         activation_time = timer()
         for _ in range(new_worker_num):
             worker = self.coordinator.worker_pool.activate_standby_worker(current_time=activation_time)
@@ -360,15 +369,16 @@ class CoordinatorService:
                 break
             logging.warning(f"Activated standby worker_id: {worker.worker_id}")
 
-        # 3.5) Expand Kafka topic partitions to match the new partition count
-        await self.coordinator.expand_kafka_topic_partitions(new_graph, effective_n_partitions)
-        # Allow time for Kafka metadata to propagate to brokers and workers
-        await asyncio.sleep(2)
+        # 4) Expand Kafka topic partitions to match the new partition count
+        if effective_n_partitions > current_partitions:
+            await self.coordinator.expand_kafka_topic_partitions(new_graph, effective_n_partitions)
+            # Allow time for Kafka metadata to propagate to brokers and workers
+            await asyncio.sleep(2)
 
-        # 4) Recompute assignments so standby/new workers become participating
+        # 5) Recompute assignments so standby/new workers become participating
         self.coordinator.reschedule_all_partitions_round_robin(new_graph)
 
-        # 5) Kick off the existing migration pipeline (state repartition + transfer + resume)
+        # 6) Start the data migration
         self.migration_metadata = MigrationMetadata(len(self.coordinator.worker_pool.get_participating_workers()))
         logging.warning(
             f"SCALE_UP | starting migration | new_n_partitions={effective_n_partitions} "
@@ -381,61 +391,58 @@ class CoordinatorService:
         self.migration_start_time_gauge.set(start_time / 1_000_000)
         self.migration_start_time = start_time
         self.migration_start_count.inc()
+        self.live_worker_count_gauge.set(len(self.coordinator.worker_pool.get_live_workers()))
 
-    async def scale_down(self, new_n_partitions: int) -> None:
-        """Scale down the cluster by reducing partition count and deactivating idle workers.
-        
-        After migration completes, workers with no assigned partitions will be
-        moved back to standby via the _pending_downscale flag.
+    async def scale_down(self, workers_to_remove: int) -> None:
+        """Scale down by removing *workers_to_remove* workers without changing
+        the partition count. The existing partitions are redistributed across
+        the surviving workers; victims keep zero assignments but stay live so
+        they can participate in migration (send their state). After migration
+        completes, victims are deactivated to standby.
         """
         if self.migration_in_progress:
-            logging.warning("ScaleDown requested but a migration is already in progress.")
+            logging.warning("Scale Down requested but a migration is already in progress.")
             return
         if not self.coordinator.graph_submitted or self.coordinator.submitted_graph is None:
-            logging.warning("ScaleDown requested but no graph is currently submitted.")
+            logging.warning("Scale Down requested but no graph is currently submitted.")
             return
 
-        current_partitions = self.coordinator.submitted_graph.max_operator_parallelism
-        if new_n_partitions <= 0:
-            logging.warning(f"ScaleDown requested with invalid new_n_partitions={new_n_partitions}")
-            return
-        if new_n_partitions >= current_partitions:
+        live_workers = self.coordinator.worker_pool.get_live_workers()
+        if workers_to_remove <= 0 or workers_to_remove >= len(live_workers):
             logging.warning(
-                f"ScaleDown requested but new_n_partitions={new_n_partitions} >= current={current_partitions}"
+                f"Scale Down requested with invalid workers_to_remove={workers_to_remove} (live={len(live_workers)})"
             )
             return
 
-        # 1) Build an updated graph with fewer partitions
-        new_graph = deepcopy(self.coordinator.submitted_graph)
-        new_graph.max_operator_parallelism = new_n_partitions
-        for _op_name, op in iter(new_graph):
-            if hasattr(op, "set_n_partitions"):
-                op.set_n_partitions(new_n_partitions)
-            else:
-                op.n_partitions = new_n_partitions
+        # 1) Pick victims (highest worker-ids for now)
+        sorted_workers = sorted(live_workers, key=lambda w: w.worker_id, reverse=True)
+        self._downscale_victim_ids: set[int] = {w.worker_id for w in sorted_workers[:workers_to_remove]}
 
-        # 2) Gracefully stop the transactional protocol
+        # 2) Mark migration in progress and stop snapshotting.
         self.migration_in_progress = True
         self._pending_downscale = True
         await self.stop_snapshotting()
-        if self.aria_metadata is not None:
-            self.aria_metadata.stop_in_next_epoch()
 
-        # 3) Reschedule partitions -- with fewer partitions, some workers get 0
-        self.coordinator.reschedule_all_partitions_round_robin(new_graph)
+        graph = deepcopy(self.coordinator.submitted_graph)
+        # 3) Reschedule all partitions onto survivors only.
+        self.coordinator.worker_pool.reschedule_excluding(self._downscale_victim_ids, graph)
 
-        # 4) Kick off the migration pipeline
-        self.migration_metadata = MigrationMetadata(len(self.coordinator.worker_pool.get_participating_workers()))
+        # 4) Start the migration pipeline. Barrier counts include ALL live workers (including victims) because
+        # every worker must hit every migration barrier, include_all_live=True ensures this
+        n_live = len(self.coordinator.worker_pool.get_live_workers())
+        self.migration_metadata = MigrationMetadata(n_live)
         logging.warning(
-            f"SCALE_DOWN | starting migration | new_n_partitions={new_n_partitions} "
-            f"workers_live={len(self.coordinator.worker_pool.get_live_workers())} "
+            f"SCALE_DOWN | starting migration | workers_to_remove={workers_to_remove} "
+            f"victims={self._downscale_victim_ids} "
+            f"workers_live={n_live}"
             f"workers_participating={len(self.coordinator.worker_pool.get_participating_workers())}"
         )
-        await self.coordinator.update_stateflow_graph(new_graph)
+        await self.coordinator.update_stateflow_graph(graph, include_all_live=True)
         start_time = time.time_ns()
         self.migration_start_time_gauge.set(start_time / 1_000_000)
         self.migration_start_time = start_time
         self.migration_start_count.inc()
+        self.live_worker_count_gauge.set(n_live)
 
     async def coordinator_controller(
         self,
@@ -502,12 +509,9 @@ class CoordinatorService:
             logging.info("Submitted Stateflow Graph Update to Workers")
 
     async def _start_migration(self, graph: StateflowGraph) -> None:
-        # Gracefully stop the transactional protocol in the next epoch
+        # Phase A: do NOT stop the protocol yet — workers will rehash in the background
         self.migration_in_progress = True
         await self.stop_snapshotting()
-
-        if self.aria_metadata is not None:
-            self.aria_metadata.stop_in_next_epoch()
 
         logging.warning(f"MIGRATION | START {graph}")
         await self.coordinator.update_stateflow_graph(graph)
@@ -528,27 +532,14 @@ class CoordinatorService:
     async def _handle_migration_repartitioning_done(
         self,
         _: StreamWriter,
-        data: bytes,
-        __: concurrent.futures.ProcessPoolExecutor,
+        __: bytes,
+        ___: concurrent.futures.ProcessPoolExecutor,
     ) -> None:
         mt = MessageType.MigrationRepartitioningDone
         logging.warning("Migration repartitioning done received!")
 
         async with self.networking_locks[mt]:
-            epoch_counter, t_counter, input_offsets, output_offsets = self.networking.decode_message(data)
-            logging.warning(f"""MIGRATION REPARTITIONING DONE RECEIVED
-                        | Epoch: {epoch_counter}
-                        | T_Counter: {t_counter}
-                        | Input Offsets: {input_offsets}
-                        | Output Offsets: {output_offsets}
-                    """)
-
-            sync_complete: bool = await self.migration_metadata.repartitioning_done(
-                epoch_counter,
-                t_counter,
-                input_offsets,
-                output_offsets,
-            )
+            sync_complete: bool = await self.migration_metadata.repartitioning_done()
 
             logging.warning(f"Migration repartitioning is complete: {sync_complete}")
 
@@ -561,12 +552,19 @@ class CoordinatorService:
     async def _handle_migration_init_done(
         self,
         _: StreamWriter,
-        __: bytes,
-        ___: concurrent.futures.ProcessPoolExecutor,
+        data: bytes,
+        __: concurrent.futures.ProcessPoolExecutor,
     ) -> None:
         mt = MessageType.MigrationInitDone
         async with self.networking_locks[mt]:
-            sync_complete: bool = await self.migration_metadata.set_empty_sync_done(mt)
+            epoch_counter, t_counter, input_offsets, output_offsets = self.networking.decode_message(data)
+
+            sync_complete: bool = await self.migration_metadata.init_done(
+                epoch_counter,
+                t_counter,
+                input_offsets,
+                output_offsets,
+            )
             logging.warning(f"MIGRATION | MigrationInitDone | {self.migration_metadata.sync_sum}")
 
             if not sync_complete:
@@ -865,7 +863,7 @@ class CoordinatorService:
             # Feed the Chronos metric buffer
             now = time.time()
             self.metric_buffer.add("input_rate", worker_epoch_stats.input_rate, now)
-            
+
             sync_complete: bool = self.aria_metadata.set_empty_sync_done(worker_id)
             if not sync_complete:
                 return
@@ -887,7 +885,7 @@ class CoordinatorService:
             self.epoch_backlog_accum.clear()
             self.epoch_rate_accum.clear()
             self.num_keys_accum.clear()
-            #logging.warning(f"Epoch duration: {self.epoch_duration_window.average()}")
+            # logging.warning(f"Epoch duration: {self.epoch_duration_window.average()}")
 
             if self.enable_autoscale and not self.migration_in_progress:
                 smoothed_tps = self.tps_sliding_window.average() or 0.0
@@ -897,24 +895,25 @@ class CoordinatorService:
                 ):
                     to_add = self._resolve_scale_up_workers(1)
                     if to_add == 0:
-                        logging.warning(f"PID | no standby workers available, skipping scale up")
+                        logging.warning("PID | no standby workers available, skipping scale up")
                         return
                     new_partition_num = len(self.coordinator.worker_pool.get_participating_workers()) + to_add
                     await self.scale_up(new_partition_num, to_add)
-                    self.last_scale_action_time = time.time()
 
     def _estimate_migration_time(self, total_keys: int) -> float:
-        estimated_migration_time = (total_keys * self.epoch_duration_window.average() / ASYNC_MIGRATION_BATCH_SIZE) / 1000.0
+        estimated_migration_time = (
+            total_keys * self.epoch_duration_window.average() / ASYNC_MIGRATION_BATCH_SIZE
+        ) / 1000.0
         self.migration_time_window.add(estimated_migration_time)
         return self.migration_time_window.average()
-    
+
     def _resolve_scale_up_workers(self, to_add: int) -> int:
         """Scale up only activates workers from _standby_queue; clamp and skip if none left.
         Returns the number of workers to add.
         """
         n_standby = self.coordinator.worker_pool.pending_standby_worker_count()
         if n_standby == 0:
-            logging.warning(f"SCALE UP | no standby workers available")
+            logging.warning("SCALE UP | no standby workers available")
             return 0
         if to_add > n_standby:
             logging.warning(f"SCALE UP | not enough standby workers clamping to {n_standby} workers")
@@ -930,7 +929,7 @@ class CoordinatorService:
         if confidence < self.capacity_confidence_threshold:
             logging.warning(f"PREDICTIVE | low confidence={confidence:.2f}")
             return False, 0
-        
+
         n_workers = len(self.coordinator.worker_pool.get_live_workers())
         raw_capacity = self.system_capacity_estimator.estimate_system_capacity()
         if raw_capacity is None:
@@ -946,7 +945,7 @@ class CoordinatorService:
         effective_capacity = system_capacity * headroom_factor
         logging.warning(
             f"PREDICTIVE | confidence={confidence:.2f} | peak_p90={peak_p90:.0f} peak_p75={peak_p75:.0f} | "
-            f"raw_capacity={raw_capacity:.0f} | smoothed_capacity={system_capacity:.0f} | effective={effective_capacity:.0f}"
+            f"raw_capacity={raw_capacity:.0f} | effective={effective_capacity:.0f}"
         )
         if peak_p75 <= effective_capacity:
             return False, 0
@@ -957,61 +956,46 @@ class CoordinatorService:
         )
         # Don't more than double the cluster in one step
         to_add = min(n_needed - n_workers, n_workers)
-        if to_add <= 0:
+        if to_add <= 0 or (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
             return False, 0
         # scale_up only activates workers from _standby_queue; clamp and skip if none left
         to_add = self._resolve_scale_up_workers(to_add)
         if to_add == 0:
             return False, 0
-        logging.warning(
-            f"PREDICTIVE | SCALE UP: need {n_needed} workers "
-            f"(currently {n_workers}, adding {to_add})"
-        )
+
+        logging.warning(f"PREDICTIVE | SCALE UP: need {n_needed} workers (currently {n_workers}, adding {to_add})")
         return True, to_add
 
-    def _compute_predictive_downscaling(
-        self, predictions: dict[str, list[float]] | None
-    ) -> tuple[bool, int]:
+    def _compute_predictive_downscaling(self, predictions: dict[str, list[float]] | None) -> tuple[bool, int]:
         """Check if the system can serve predicted demand with fewer workers.
         Returns (should_downscale, workers_to_remove).
         """
         n_workers = len(self.coordinator.worker_pool.get_live_workers())
-        if n_workers <= 1:
-            return False, 0
-
-        # Same confidence gate as upscaling
-        confidence = self.system_capacity_estimator.confidence
-        if confidence < self.capacity_confidence_threshold:
-            return False, 0
-
         # Backlog must be zero before considering downscale
         total_backlog = sum(self.epoch_backlog_accum.values())
-        if total_backlog > 0:
+        if n_workers <= 1 or total_backlog > 0 or self._capacity_ewma is None:
             return False, 0
 
-        system_capacity = self._capacity_ewma
-        if system_capacity is None:
-            return False, 0
-        per_worker_cap = system_capacity / n_workers
-
+        per_worker_cap = self._capacity_ewma / n_workers
         # Determine peak expected demand (pessimistic: use current rate and p90 forecast)
-        current_rate = self.tps_sliding_window.average() or 0.0
-        peak_demand = current_rate
+        peak_demand = self.tps_sliding_window.average() or 0.0
         if predictions:
             p90_peak = max(predictions.get("0.9", [0.0]))
             peak_demand = max(peak_demand, p90_peak)
 
-        # Can (n-1) workers handle peak demand with headroom?
-        reduced_capacity = per_worker_cap * (n_workers - 1)
-        if peak_demand < reduced_capacity * self.downscale_safety_factor:
-            logging.warning(
-                f"PREDICTIVE | SCALE DOWN: peak_demand={peak_demand:.0f} < "
-                f"reduced_capacity={reduced_capacity:.0f} * {self.downscale_safety_factor} = "
-                f"{reduced_capacity * self.downscale_safety_factor:.0f} | removing 1 worker"
-            )
-            return True, 1
+        # Can n workers handle peak demand with headroom?
+        to_remove = 0
+        for n in range(n_workers - 1, 1, -1):
+            estimated_capacity = per_worker_cap * n * self.downscale_safety_factor
+            logging.warning(f"SCALE DOWN: estimated_capacity={estimated_capacity:.0f} | peak_demand={peak_demand:.0f}")
+            if peak_demand < estimated_capacity:
+                logging.warning(f"SCALE DOWN: removing {n_workers - n} workers")
+                to_remove = n_workers - n
+            else:
+                break
 
-        return False, 0
+        perform_downscale = to_remove > 0
+        return perform_downscale, to_remove
 
     async def chronos_forecast_loop(self) -> None:
         """Periodically submit metric snapshots to the Chronos forecaster
@@ -1022,7 +1006,6 @@ class CoordinatorService:
                 continue
 
             context = self.metric_buffer.snapshot()
-            #print(f"CHRONOS | context: {context}")
             if not context:
                 continue
 
@@ -1030,30 +1013,25 @@ class CoordinatorService:
             logging.warning(f"Estimated migration time: {estimated_migration_time} seconds")
 
             min_prediction_horizon = 10
-            self.chronos_forecaster.submit(context, prediction_length=max(min_prediction_horizon, ceil(estimated_migration_time)))
+            self.chronos_forecaster.submit(
+                context, prediction_length=max(min_prediction_horizon, ceil(estimated_migration_time))
+            )
             predictions = self.chronos_forecaster.poll()
             logging.warning(f"CHRONOS | predictions: {predictions}")
             if predictions and self.enable_autoscale and not self.migration_in_progress:
                 should_scale, to_add = self._compute_predictive_scaling(predictions)
-                if should_scale and not (
-                    time.time() - self.last_scale_action_time < self.scale_cooldown_period
-                ):
+                if should_scale and not (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
                     n_workers = len(self.coordinator.worker_pool.get_participating_workers())
                     new_partition_num = n_workers + to_add
                     await self.scale_up(new_partition_num, to_add)
-                    self.last_scale_action_time = time.time()
-                    self.live_worker_count_gauge.set(len(self.coordinator.worker_pool.get_live_workers()))
+
                 elif not should_scale:
                     # Check for downscaling opportunity if we didn't scale up
                     should_downscale, to_remove = self._compute_predictive_downscaling(predictions)
                     if should_downscale and not (
                         time.time() - self.last_scale_action_time < self.scale_cooldown_period
                     ):
-                        n_workers = len(self.coordinator.worker_pool.get_participating_workers())
-                        new_partition_num = n_workers - to_remove
-                        await self.scale_down(new_partition_num)
-                        self.last_scale_action_time = time.time()
-                        self.live_worker_count_gauge.set(len(self.coordinator.worker_pool.get_live_workers()))
+                        await self.scale_down(to_remove)
 
     def _record_epoch_metrics(
         self,
@@ -1160,13 +1138,12 @@ class CoordinatorService:
             self.migration_end_time_gauge.set(end_time / 1_000_000)
             self.migration_end_time = end_time
             self.migration_end_count.inc()
-            logging.warning(
-                f"MIGRATION_DURATION: {(self.migration_end_time / 1_000_000_000)- (self.migration_start_time / 1_000_000_000)} s",
-            )
+            migration_duration = (self.migration_end_time - self.migration_start_time) / 1_000_000_000
+            logging.warning(f"MIGRATION_DURATION: {migration_duration:.2f} s")
             await self.migration_metadata.cleanup(mt)
             self.migration_in_progress = False
 
-            # Deactivate workers that ended up with no partitions after scale-down
+            # Deactivate victim workers after scale-down migration completes
             if self._pending_downscale:
                 non_participating_workers = self.coordinator.worker_pool.get_non_participating_workers()
                 logging.warning(
@@ -1177,8 +1154,10 @@ class CoordinatorService:
                     if deactivated:
                         self.system_capacity_estimator.remove_worker(worker.worker_id)
                 self._pending_downscale = False
+                self._downscale_victim_ids.clear()
                 self.live_worker_count_gauge.set(len(self.coordinator.worker_pool.get_live_workers()))
 
+            self.last_scale_action_time = time.time()
             logging.warning("Restarting the snapshotting mechanism")
             self.snapshotting_task = asyncio.create_task(self.send_snapshot_marker())
 
@@ -1243,9 +1222,32 @@ class CoordinatorService:
                 await server.serve_forever()
 
     async def finalize_migration_repartition(self) -> None:
+        # Acquire the SyncCleanup lock to prevent a race where
+        # _handle_sync_cleanup reads stop_next_epoch=False (before we set it),
+        # sends stop_gracefully=False, then cleanup() resets the flag — which
+        # would silently consume the stop request we are about to issue.
+        async with self.networking_locks[MessageType.SyncCleanup]:
+            if self.aria_metadata is not None:
+                self.aria_metadata.stop_in_next_epoch()
+
+        logging.warning("Sending MigrationRepartitioningDone to all workers (protocol will stop)")
         async with asyncio.TaskGroup() as tg:
-            for worker in self.coordinator.worker_pool.get_participating_workers():
+            for worker in self._migration_workers():
                 logging.warning(f"Sending MigrationRepartitioningDone to : {worker}")
+                tg.create_task(
+                    self.networking.send_message(
+                        worker.worker_ip,
+                        worker.worker_port,
+                        msg=b"",
+                        msg_type=MessageType.MigrationRepartitioningDone,
+                        serializer=Serializer.NONE,
+                    ),
+                )
+
+    async def finalize_migration(self) -> None:
+        async with asyncio.TaskGroup() as tg:
+            for worker in self._migration_workers():
+                logging.warning(f"Sending MigrationDone to : {worker}")
                 tg.create_task(
                     self.networking.send_message(
                         worker.worker_ip,
@@ -1256,23 +1258,9 @@ class CoordinatorService:
                             self.migration_metadata.input_offsets,
                             self.migration_metadata.output_offsets,
                         ),
-                        msg_type=MessageType.MigrationRepartitioningDone,
-                        serializer=Serializer.MSGPACK,
-                    )
-                )
-
-    async def finalize_migration(self) -> None:
-        async with asyncio.TaskGroup() as tg:
-            for worker in self.coordinator.worker_pool.get_participating_workers():
-                logging.warning(f"Sending MigrationDone to : {worker}")
-                tg.create_task(
-                    self.networking.send_message(
-                        worker.worker_ip,
-                        worker.worker_port,
-                        msg=b"",
                         msg_type=MessageType.MigrationDone,
-                        serializer=Serializer.NONE,
-                    )
+                        serializer=Serializer.MSGPACK,
+                    ),
                 )
 
     async def finalize_worker_sync(
@@ -1282,7 +1270,7 @@ class CoordinatorService:
         serializer: Serializer = Serializer.MSGPACK,
     ) -> None:
         async with asyncio.TaskGroup() as tg:
-            for worker in self.coordinator.worker_pool.get_participating_workers():
+            for worker in self._migration_workers():
                 tg.create_task(
                     self.protocol_networking.send_message(
                         worker.worker_ip,
@@ -1295,7 +1283,7 @@ class CoordinatorService:
 
     async def worker_wants_to_proceed(self) -> None:
         async with asyncio.TaskGroup() as tg:
-            for worker in self.coordinator.worker_pool.get_participating_workers():
+            for worker in self._migration_workers():
                 tg.create_task(
                     self.protocol_networking.send_message(
                         worker.worker_ip,

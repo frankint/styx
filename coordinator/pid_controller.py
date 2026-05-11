@@ -8,7 +8,7 @@ class BacklogPIDController:
     kp: float = 0.1
     ki: float = 0.001
     kd: float = 0.1
-    d_smoothing: float = 0.6 # EMA alpha for derivative
+    d_smoothing: float = 0.6  # EMA alpha for derivative
 
     integral_max: float = 100.0
     scale_up_threshold: float = 1.0
@@ -40,12 +40,8 @@ class BacklogPIDController:
 
         # D: is the trend getting worse? (smoothed, per-epoch)
         raw_derivative = error - self.prev_error
-        self.smoothed_derivative = (
-            self.d_smoothing * raw_derivative
-            + (1 - self.d_smoothing) * self.smoothed_derivative
-        )
+        self.smoothed_derivative = self.d_smoothing * raw_derivative + (1 - self.d_smoothing) * self.smoothed_derivative
         d_term = self.kd * self.smoothed_derivative
-
 
         self.prev_error = error
         logging.warning(f"CONTROLLER | P term: {p_term}, I term: {i_term}, D term: {d_term}")

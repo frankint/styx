@@ -189,8 +189,10 @@ class SyncStyxClient(BaseStyxClient):
                     if actual_partitions >= required_partitions:
                         break
                 logging.warning(
-                    f"Waiting for Kafka to know about {required_partitions} partitions "
-                    f"for topic {operator_name} (currently knows {actual_partitions if operator_name in md.topics else 0})",
+                    "Waiting for Kafka to know about %s partitions for topic %s (cur knows %s)",
+                    required_partitions,
+                    operator_name,
+                    actual_partitions if operator_name in md.topics else 0,
                 )
                 time.sleep(0.5)
 

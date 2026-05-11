@@ -6,11 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app"
 
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && python -m venv /opt/venv \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r styx && useradd -l -r -m -d /usr/local/styx -g styx styx
+    && groupadd styx && useradd -l -m -d /usr/local/styx -g styx styx
 
 ENV PYTHONPATH="/usr/local/styx"
 ENV UV_LINK_MODE=copy
@@ -20,14 +20,16 @@ USER styx
 
 COPY --chown=styx:styx coordinator/pyproject.toml coordinator/uv.lock ./
 
+RUN id styx
+
 # Stage 1: Install all external deps (cached)
-RUN --mount=type=cache,target=/home/styx/.cache/uv,uid=1000,gid=1000 \
+RUN --mount=type=cache,target=/home/styx/.cache/uv \
     uv sync --frozen --no-install-package styx
 
 COPY --chown=styx:styx styx-package /usr/local/styx-package/
 
 # Stage 2: Copy local package and finish
-RUN --mount=type=cache,target=/home/styx/.cache/uv,uid=1000,gid=1000 \
+RUN --mount=type=cache,target=/home/styx/.cache/uv \
     uv sync --frozen
 
 COPY --chown=styx:styx coordinator coordinator

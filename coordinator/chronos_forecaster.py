@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
-import os
 import time
 from typing import Any
 
@@ -54,20 +53,24 @@ def _forecaster_loop(
             series = context_map["input_rate"]
             if len(series) < MIN_CONTEXT_LENGTH:
                 log.warning("CHRONOS | Not enough data to forecast")
-                result_queue.put({
-                    "predictions": {
-                        "0.75": [0.0] * prediction_length,
-                        "0.9": [0.0] * prediction_length,
-                    },
-                })
+                result_queue.put(
+                    {
+                        "predictions": {
+                            "0.75": [0.0] * prediction_length,
+                            "0.9": [0.0] * prediction_length,
+                        },
+                    }
+                )
                 continue
             regular_ts = pd.date_range("2024-01-01", periods=len(series), freq="1s")
 
-            context_df = pd.DataFrame({
-                "item_id": ["styx"] * len(series),
-                "timestamp": regular_ts,
-                "target": series,
-            })
+            context_df = pd.DataFrame(
+                {
+                    "item_id": ["styx"] * len(series),
+                    "timestamp": regular_ts,
+                    "target": series,
+                }
+            )
 
             predictions_df = pipeline.predict_df(
                 context_df,
@@ -75,16 +78,19 @@ def _forecaster_loop(
                 quantile_levels=[0.75, 0.9],
             )
 
-            result_queue.put({
-                "predictions": {
-                    "0.75": predictions_df["0.75"].tolist(),
-                    "0.9": predictions_df["0.9"].tolist(),
-                },
-            })
-            log.warning(f"CHRONOS | Forecast completed in {time.time() - start_time:.2f} seconds")
+            result_queue.put(
+                {
+                    "predictions": {
+                        "0.75": predictions_df["0.75"].tolist(),
+                        "0.9": predictions_df["0.9"].tolist(),
+                    },
+                }
+            )
+            log.warning("CHRONOS | forecast completed in %.2fs", time.time() - start_time)
         except Exception as e:
             log.exception("Forecast error")
             result_queue.put({"error": str(e)})
+
 
 # Coordinator-side handle for the background forecaster process.
 class ChronosForecaster:
@@ -117,13 +123,16 @@ class ChronosForecaster:
         """Enqueue a forecast request.  Returns False if the queue is full
         (a previous request is still being processed)."""
         try:
-            self._request_queue.put_nowait({
-                "context": context,
-                "prediction_length": prediction_length,
-            })
-            return True
+            self._request_queue.put_nowait(
+                {
+                    "context": context,
+                    "prediction_length": prediction_length,
+                }
+            )
         except Exception:
             return False
+        else:
+            return True
 
     def poll(self) -> dict[str, dict[str, list[float]]] | None:
         """Blocking poll for completed forecasts.

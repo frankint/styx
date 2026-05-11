@@ -60,7 +60,7 @@ class DecreaseLoadGenerator(LoadGenerator):
         values = []
         val = self.target_tps
         for i in range(0, self.time):
-            val += random.randrange(int(-self.magnitude * (1 / 21)), int(self.magnitude * (1 / 28)))
+            val += random.randrange(int(-self.magnitude * (1 / 15)), int(self.magnitude * (1 / 30)))
             if self.max_threshold is not None and val > self.max_threshold:
                 val = self.max_threshold
             values.append(val)
@@ -68,12 +68,11 @@ class DecreaseLoadGenerator(LoadGenerator):
 
 
 class CosineLoadGenerator(LoadGenerator):
-    def __init__(self, target_tps: int, time: int, cosine_period: int, mean_input_rate: int,
+    def __init__(self, target_tps: int, time: int, cosine_period: int,
                  max_divergence: int, max_noise: int, max_threshold: int | None = None):
         super().__init__(time, max_threshold)
         self.target_tps = target_tps
         self.cosine_period = cosine_period
-        self.mean_input_rate = mean_input_rate
         self.max_divergence = max_divergence
         self.max_noise = max_noise
     
@@ -81,7 +80,7 @@ class CosineLoadGenerator(LoadGenerator):
         values = []
         for i in range(0, self.time):
             period = (2 * math.pi / self.cosine_period)
-            value = self.mean_input_rate + self.max_divergence * math.cos(period * i + math.pi)
+            value = self.target_tps + self.max_divergence * math.cos(period * i + math.pi)
             value += random.random() * (2 * self.max_noise) - self.max_noise
             if self.max_threshold is not None and value > self.max_threshold:
                 value = self.max_threshold

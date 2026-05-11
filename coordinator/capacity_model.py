@@ -13,30 +13,29 @@ class WorkerCapacityModel:
         self.epoch_max_size = epoch_max_size
         self.min_batch_threshold = min_batch_threshold
         self.base_alpha = base_alpha
-        
+
         self._per_txn_cost_ewma: float | None = None
         self._max_observed_batch: int = 0
 
     def record(self, batch_size: int, epoch_latency_ms: float) -> None:
         """Record an epoch's metrics and update the per-txn cost EWMA.
-        
         Args:
             batch_size: Number of transactions processed in this epoch (total_txns)
             epoch_latency_ms: Total epoch latency in milliseconds
         """
         if batch_size < self.min_batch_threshold or epoch_latency_ms <= 0:
             return
-        
+
         per_txn_cost = epoch_latency_ms / batch_size
-        
+
         # Track max observed batch for confidence calculation
         self._max_observed_batch = max(self._max_observed_batch, batch_size)
-        
-        # Weight the EWMA alpha by batch size -- larger batches (more accurate) 
+
+        # Weight the EWMA alpha by batch size -- larger batches (more accurate)
         # should dominate the estimate
         weight = min(batch_size / self.epoch_max_size, 1.0)
         effective_alpha = self.base_alpha * weight
-        
+
         if self._per_txn_cost_ewma is None:
             self._per_txn_cost_ewma = per_txn_cost
         else:
@@ -44,7 +43,6 @@ class WorkerCapacityModel:
 
     def estimate_max_tps(self) -> float | None:
         """Estimate maximum sustainable TPS for this worker.
-        
         Returns:
             Estimated max TPS, or None if no data recorded yet.
         """
@@ -55,7 +53,6 @@ class WorkerCapacityModel:
     @property
     def confidence(self) -> float:
         """Confidence score based on max observed batch size.
-        
         Returns a value in [0, 1] indicating how reliable the estimate is.
         At confidence=0.25 (batch=250/1000), predictive scaling can kick in.
         """
@@ -99,7 +96,6 @@ class SystemCapacityEstimator:
         epoch_latency_ms: float,
     ) -> None:
         """Record epoch metrics for a worker.
-        
         Args:
             worker_id: The worker ID
             total_txns: Total transactions processed in this epoch
@@ -109,7 +105,6 @@ class SystemCapacityEstimator:
 
     def estimate_system_capacity(self) -> float | None:
         """Return estimated total system TPS across all workers.
-        
         Uses the minimum per-worker capacity (the bottleneck) multiplied
         by the number of workers.
         """
@@ -130,17 +125,14 @@ class SystemCapacityEstimator:
 
     @property
     def confidence(self) -> float:
-        """System-level confidence as the minimum worker confidence.
-        
-        Returns 0 if no models exist or none have data.
-        """
+        """System-level confidence as the minimum worker confidence."""
         if not self._models:
             return 0.0
-        
+
         confidences = [model.confidence for model in self._models.values()]
         if not confidences:
             return 0.0
-        
+
         return min(confidences)
 
     def remove_worker(self, worker_id: int) -> None:
