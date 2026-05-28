@@ -359,7 +359,7 @@ class Worker:
 
     def _is_standby(self) -> bool:
         """True when the worker has not yet received state (fresh standby)."""
-        return not isinstance(self.local_state, InMemoryOperatorState)
+        return not isinstance(self.local_state, InMemoryOperatorState) or not self.registered_operators
 
     async def _handle_init_migration(self, data: bytes, _: MessageType) -> None:
         """Phase A: rehash in background while protocol keeps running."""
@@ -568,6 +568,10 @@ class Worker:
 
         # Rebuild operators and topic partitions for new assignment
         self._build_registered_operators(self.worker_operators)
+
+        # if not self.registered_operators:
+        #     self.local_state = Stateless()
+
 
         # Update snapshot helper
         if self.async_snapshots is None:
@@ -919,6 +923,9 @@ class Worker:
         operator_partitions: set[OperatorPartition] = set(
             self.registered_operators.keys(),
         )
+        if not operator_partitions:
+            self.local_state = Stateless()
+            return
         if self.operator_state_backend is LocalStateBackend.DICT:
             self.local_state = InMemoryOperatorState(operator_partitions)
             self.local_state.set_data_from_snapshot(data)

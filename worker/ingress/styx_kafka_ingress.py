@@ -73,12 +73,15 @@ class StyxKafkaIngress(BaseIngress):
         await self.started.wait()
 
     async def stop(self) -> None:
-        self.kafka_ingress_task.cancel()
-        try:
-            await self.kafka_ingress_task
-        except asyncio.CancelledError:
-            logging.warning("kafka ingress coroutine suts down...")
-        await self.kafka_consumer.stop()
+        if self.kafka_ingress_task is not None:
+            self.kafka_ingress_task.cancel()
+            try:
+                await self.kafka_ingress_task
+            except asyncio.CancelledError:
+                logging.warning("kafka ingress coroutine suts down...")
+
+        if self.kafka_consumer is not None:
+            await self.kafka_consumer.stop()
 
     def handle_message_from_kafka(self, msg: ConsumerRecord) -> None:
         current_epoch = self.sequencer.epoch_counter

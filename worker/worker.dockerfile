@@ -27,6 +27,8 @@ RUN --mount=type=cache,target=/home/styx/.cache/uv,uid=1000,gid=1000 \
 COPY --chown=styx:styx worker worker
 COPY --chown=styx:styx worker/start-worker.sh /usr/local/bin/
 
+RUN uv run python worker/setup.py build_ext --inplace
+
 RUN chmod a+x /usr/local/bin/start-worker.sh
 
 ARG epoch_size=100

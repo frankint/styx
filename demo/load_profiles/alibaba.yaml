@@ -1,0 +1,5 @@
+profile: "alibaba"
+step_size: 1 # each datapoint is one second
+csv_path: "data/cluster_summary.csv"
+min_tps: 100
+max_tps: 5000

@@ -64,7 +64,8 @@ class StyxKafkaBatchEgress(BaseEgress):
 
     async def stop(self) -> None:
         await self.send_batch()
-        await self.kafka_egress_producer.stop()
+        if self.kafka_egress_producer is not None:
+            await self.kafka_egress_producer.stop()
 
     async def send(
         self,

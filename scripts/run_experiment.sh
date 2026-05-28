@@ -54,7 +54,7 @@ echo "workload_profile: $workload_profile"
 echo "==================================================="
 
 case "$workload_profile" in
-    constant|increasing|decreasing|random|cosine|step) ;;
+    constant|increasing|decreasing|random|cosine|step|alibaba) ;;
     *)
         echo "ERROR: Unknown workload profile: $workload_profile"
         exit 1

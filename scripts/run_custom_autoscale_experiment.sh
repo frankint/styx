@@ -1,50 +1,57 @@
 #!/bin/bash
 set -eo pipefail
 
-styx_threads_per_worker=1
-enable_compression=true
-use_composite_keys=true
-use_fallback_cache=true
-regenerate_tpcc_data=false
-
+# 1. Read Positional Arguments
 workload_name=$1
 input_rate=$2
 n_keys=$3
-n_part=$4
-zipf_const=$5
-client_threads=$6
+max_workers=$4
+start_workers=$5
+zipf_const=$6
 total_time=$7
 saving_dir=$8
 warmup_seconds=$9
 epoch_size=${10}
 workload_profile=${11}
-num_standby_workers=${12:-$n_part}
-[ -n "${13}" ] && styx_threads_per_worker=${13}
-[ -n "${14}" ] && enable_compression=${14}
-[ -n "${15}" ] && use_composite_keys=${15}
-[ -n "${16}" ] && use_fallback_cache=${16}
-[ -n "${17}" ] && regenerate_tpcc_data=${17}
+
+# 2. Optional arguments (with defaults)
+styx_threads_per_worker=${12:-1}
+enable_compression=${13:-true}
+use_composite_keys=${14:-true}
+use_fallback_cache=${15:-true}
+regenerate_tpcc_data=${16:-false}
+
+# 3. Apply Custom Autoscale Logic
+n_part=$max_workers
+client_threads=$max_workers
+num_standby_workers=$((max_workers - start_workers))
+
+# Ensure INITIAL_WORKERS matches start_workers for start_styx_cluster.sh
+export INITIAL_WORKERS=$start_workers
+
 kill_at="-1" 
 autoscaling_enabled="true"
 
-# Deployment mode configuration (read from environment).
-# Modes: docker-compose | k8s-minikube | k8s-cluster
+# Deployment mode configuration
 DEPLOY_MODE=${DEPLOY_MODE:-docker-compose}
 RELEASE_NAME=${RELEASE_NAME:-styx-cluster}
 NAMESPACE=${NAMESPACE:-styx}
 
-echo "============= Running Experiment ================="
+echo "============= Running Custom Autoscale Experiment ================="
 echo "workload_name: $workload_name"
 echo "input_rate: $input_rate"
 echo "n_keys: $n_keys"
-echo "n_part: $n_part"
+echo "max_workers: $max_workers"
+echo "start_workers: $start_workers"
+echo "(Derived) n_part: $n_part"
+echo "(Derived) client_threads: $client_threads"
+echo "(Derived) num_standby_workers: $num_standby_workers"
+echo "(Derived) INITIAL_WORKERS: $INITIAL_WORKERS"
 echo "zipf_const: $zipf_const"
-echo "client_threads: $client_threads"
 echo "total_time: $total_time"
 echo "saving_dir: $saving_dir"
 echo "warmup_seconds: $warmup_seconds"
 echo "epoch_size: $epoch_size"
-echo "num_standby_workers: $num_standby_workers"
 echo "styx_threads_per_worker: $styx_threads_per_worker"
 echo "enable_compression: $enable_compression"
 echo "use_composite_keys: $use_composite_keys"
@@ -52,12 +59,8 @@ echo "use_fallback_cache: $use_fallback_cache"
 echo "regenerate_tpcc_data: $regenerate_tpcc_data"
 echo "autoscaling_enabled: $autoscaling_enabled"
 echo "workload_profile: $workload_profile"
-echo "=================================================="
+echo "==================================================================="
 
-# Use kubefwd to forward all services in the namespace.
-# kubefwd adds /etc/hosts entries for service names and pod FQDNs, which is
-# required for Kafka: kubectl port-forward alone causes advertised-listener
-# redirects to internal cluster DNS names that the host cannot resolve.
 _k8s_setup() {
     bash scripts/wait_for_styx_k8s.sh || { echo "ERROR: cluster readiness check failed, aborting." >&2; exit 1; }
 
@@ -89,11 +92,10 @@ load_config_path="demo/load_profiles/$workload_profile.yaml"
 if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; then
     bash scripts/install_styx_cluster_with_helm.sh
     _k8s_setup
-
 else
     # docker-compose mode
-    export INITIAL_WORKERS=1
-bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "$autoscaling_enabled"
+    bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "$autoscaling_enabled"
+    
     docker compose --profile autoscale up --scale worker-standby="$num_standby_workers" -d worker-standby >/dev/null
 
     # Wait for at least one worker to register with the coordinator
@@ -101,7 +103,6 @@ bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_wo
     max_wait=120
     waited=0
     while true; do
-        # Query Prometheus metrics for live_worker_count
         worker_count=$(curl -s http://localhost:8000/metrics 2>/dev/null | grep -E '^live_worker_count ' | awk '{print $2}' | cut -d. -f1 || true)
         if [[ -n "$worker_count" && "$worker_count" -ge 1 ]]; then
             echo "Workers ready: $worker_count worker(s) registered"
@@ -163,7 +164,6 @@ else
     echo "Benchmark not supported!"
 fi
 
-
 if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; then
     if [[ -n "${KUBEFWD_PID:-}" ]]; then
         echo "Stopping kubefwd (pid $KUBEFWD_PID)..."
@@ -172,6 +172,5 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
     fi
     bash scripts/uninstall_styx_cluster_with_helm.sh
 else
-    #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
     docker compose stop coordinator worker worker-standby
 fi

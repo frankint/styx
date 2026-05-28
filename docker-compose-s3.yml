@@ -2,7 +2,7 @@ services:
   rustfs:
     image: rustfs/rustfs:latest
     ports:
-      - "9000:9000"
+      - "${RUSTFS_PORT:-9000}:9000"
     volumes:
       - rustfs-data:/data
 

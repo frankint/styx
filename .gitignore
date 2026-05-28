@@ -169,3 +169,9 @@ logs
 
 charts/styx-cluster/Chart.lock
 charts/styx-cluster/charts
+
+
+*.svg
+raw_predictions/
+predictions.png
+predictions20260607_191125.png

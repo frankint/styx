@@ -32,7 +32,10 @@ from styx.common.util.aio_task_scheduler import AIOTaskScheduler
 import uvloop
 
 from coordinator.capacity_model import SystemCapacityEstimator
-from coordinator.chronos_forecaster import ChronosForecaster
+try:
+    from coordinator.forecaster_factory import create_forecaster
+except ImportError:
+    from forecaster_factory import create_forecaster
 from coordinator.metric_buffer import AggregatingMetricBuffer
 from coordinator.migration_metadata import MigrationMetadata
 from coordinator.pid_controller import BacklogPIDController
@@ -41,6 +44,11 @@ if TYPE_CHECKING:
     from styx.common.stateflow_graph import StateflowGraph
 
     from coordinator.worker_pool import Worker
+
+import csv
+import json 
+import time
+import os
 
 SERVER_PORT = 8888
 PROTOCOL_PORT = 8889
@@ -62,7 +70,7 @@ S3_INIT_MAX_RETRIES: int = int(os.getenv("S3_INIT_MAX_RETRIES", "30"))
 
 ASYNC_MIGRATION_BATCH_SIZE: int = int(os.getenv("ASYNC_MIGRATION_BATCH_SIZE", "2000"))
 SEQUENCE_MAX_SIZE: int = int(os.getenv("SEQUENCE_MAX_SIZE", "1_000"))
-CHRONOS_FORECAST_INTERVAL: float = float(os.getenv("CHRONOS_FORECAST_INTERVAL", "2.0"))
+FORECASTER_FORECAST_INTERVAL: float = float(os.getenv("FORECASTER_FORECAST_INTERVAL", "2.0"))
 
 CoordHandler = Callable[[StreamWriter, bytes, concurrent.futures.ProcessPoolExecutor], Awaitable[None]]
 
@@ -307,9 +315,21 @@ class CoordinatorService:
 
         # Chronos forecaster (background process)
         self.total_keys_accum: int = 0
-        self.metric_buffer: AggregatingMetricBuffer = AggregatingMetricBuffer(bucket_interval=1.0, max_buckets=512)
-        self.chronos_forecaster: ChronosForecaster | None = None
+        max_context_len = int(os.getenv("FORECASTER_MAX_CONTEXT_LENGTH", "512"))
+        self.metric_buffer: AggregatingMetricBuffer = AggregatingMetricBuffer(
+            bucket_interval=1.0, max_buckets=max_context_len
+        )
+        self.chronos_forecaster: Any | None = None
         self.forecaster_task: asyncio.Task | None = None
+
+        os.makedirs("raw_predictions", exist_ok=True)
+        start_timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.prediction_log_file = f"raw_predictions/predictions_vs_actual_{start_timestamp}.csv"
+
+        if not os.path.exists(self.prediction_log_file):
+            with open(self.prediction_log_file, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["timestamp", "actual_tps", "predicted_tps_horizon"])
 
     def _migration_workers(self) -> list:
         """Workers that must participate in the current migration.
@@ -939,23 +959,37 @@ class CoordinatorService:
         else:
             self._capacity_ewma += self._capacity_ewma_alpha * (raw_capacity - self._capacity_ewma)
         system_capacity = self._capacity_ewma
-        peak_p90 = max(predictions.get("0.9", [0.0]))
-        peak_p75 = max(predictions.get("0.75", [0.0]))
+
+        # Determine peak predicted value based on model type (with/without confidence support)
+        if "truth" in predictions:
+            # Treat point forecast as absolute truth
+            peak_predicted = max(predictions["truth"])
+            logging.warning(f"PREDICTIVE (Point Forecast) | peak_predicted={peak_predicted:.0f}")
+        else:
+            # Standard Chronos confidence policy
+            peak_predicted = max(predictions.get("0.75", [0.0]))
+            logging.warning(f"PREDICTIVE (Probabilistic) | peak_p75={peak_predicted:.0f}")
+
         headroom_factor = 1
         effective_capacity = system_capacity * headroom_factor
-        logging.warning(
-            f"PREDICTIVE | confidence={confidence:.2f} | peak_p90={peak_p90:.0f} peak_p75={peak_p75:.0f} | "
-            f"raw_capacity={raw_capacity:.0f} | effective={effective_capacity:.0f}"
-        )
-        if peak_p75 <= effective_capacity:
+        
+        if peak_predicted <= effective_capacity:
             return False, 0
+
+        # Point forecast scaling policy: Only scale if predictions represent a significant spike (e.g. > 15% increase)
+        if "truth" in predictions:
+            current_rate = self.tps_sliding_window.average() or 0.0
+            if peak_predicted < current_rate * 1.15:
+                logging.warning("PREDICTIVE | Predicted spike is too minor, skipping scaling action")
+                return False, 0
+
         per_worker_capacity = system_capacity / max(n_workers, 1)
         n_needed = max(
             n_workers + 1,
-            int(peak_p75 / (per_worker_capacity * headroom_factor)) + 1,
+            int(peak_predicted / (per_worker_capacity * headroom_factor)) + 1,
         )
         # Don't more than double the cluster in one step
-        to_add = min(n_needed - n_workers, n_workers)
+        to_add = 1 if n_needed > n_workers else 0
         if to_add <= 0 or (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
             return False, 0
         # scale_up only activates workers from _standby_queue; clamp and skip if none left
@@ -977,11 +1011,14 @@ class CoordinatorService:
             return False, 0
 
         per_worker_cap = self._capacity_ewma / n_workers
-        # Determine peak expected demand (pessimistic: use current rate and p90 forecast)
+        # Determine peak expected demand
         peak_demand = self.tps_sliding_window.average() or 0.0
         if predictions:
-            p90_peak = max(predictions.get("0.9", [0.0]))
-            peak_demand = max(peak_demand, p90_peak)
+            if "truth" in predictions:
+                peak_predicted = max(predictions["truth"])
+            else:
+                peak_predicted = max(predictions.get("0.9", [0.0]))
+            peak_demand = max(peak_demand, peak_predicted)
 
         # Can n workers handle peak demand with headroom?
         to_remove = 0
@@ -1001,7 +1038,7 @@ class CoordinatorService:
         """Periodically submit metric snapshots to the Chronos forecaster
         process and poll for results.  Runs as a long-lived coroutine."""
         while True:
-            await asyncio.sleep(CHRONOS_FORECAST_INTERVAL)
+            await asyncio.sleep(FORECASTER_FORECAST_INTERVAL)
             if self.chronos_forecaster is None or not self.chronos_forecaster.is_alive:
                 continue
 
@@ -1014,10 +1051,26 @@ class CoordinatorService:
 
             min_prediction_horizon = 10
             self.chronos_forecaster.submit(
+                # context, prediction_length=min(max(min_prediction_horizon, ceil(estimated_migration_time)), 20)
                 context, prediction_length=max(min_prediction_horizon, ceil(estimated_migration_time))
             )
             predictions = self.chronos_forecaster.poll()
-            logging.warning(f"CHRONOS | predictions: {predictions}")
+            logging.warning(f"FORECASTER | predictions: {predictions}")
+
+            if predictions:
+                current_actual_rate = context.get("input_rate", [0.0])[-1]
+
+                forecast_key = "truth" if "truth" in predictions else "0.75"
+                forecast_array = predictions.get(forecast_key, [])
+
+                with open(self.prediction_log_file, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        time.time(),
+                        current_actual_rate,
+                        json.dumps(forecast_array)
+                    ])
+
             if predictions and self.enable_autoscale and not self.migration_in_progress:
                 should_scale, to_add = self._compute_predictive_scaling(predictions)
                 if should_scale and not (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
@@ -1473,10 +1526,10 @@ class CoordinatorService:
         logging.warning("Coordinator Snapshotting online")
 
         if self.enable_autoscale:
-            self.chronos_forecaster = ChronosForecaster()
+            self.chronos_forecaster = create_forecaster()
             self.chronos_forecaster.start()
             self.forecaster_task = asyncio.create_task(self.chronos_forecast_loop())
-            logging.warning("Chronos forecaster online (interval=%.1fs)", CHRONOS_FORECAST_INTERVAL)
+            logging.warning("FORECASTING forecaster online (interval=%.1fs)", FORECASTER_FORECAST_INTERVAL)
 
         await self.tcp_service()
 

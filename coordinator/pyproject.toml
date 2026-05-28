@@ -18,7 +18,14 @@ dependencies = [
     "zstandard==0.25.0",
     "chronos-forecasting==2.2.2",
     "pandas==3.0.1",
+    "river==0.24.2",
 ]
+
+ # Tell uv to override any sub-dependency constraint on pandas and force 3.0.1
+    [tool.uv]
+    override-dependencies = [
+        "pandas==3.0.1"
+    ]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
