@@ -257,27 +257,6 @@ class AriaProtocol(BaseTransactionalProtocol):
         except Exception as e:
             logging.error(f"Task {task.get_name()} crashed: {e}\n{format_exc()}")
 
-    async def _epoch_watchdog(self) -> None:
-        last_epoch = -1
-        stuck_time = 0
-        while self.running:
-            await asyncio.sleep(5)
-            if not self.currently_processing:
-                stuck_time = 0
-                continue
-
-            if self.sequencer.epoch_counter == last_epoch:
-                stuck_time += 5
-                if stuck_time >= 10:
-                    logging.error(f"WATCHDOG: Epoch {last_epoch} has been stuck for {stuck_time} seconds! Dumping tasks:")
-                    for task in asyncio.all_tasks():
-                        logging.error(f"Task: {task.get_name()}")
-                        task.print_stack()
-                    logging.error("--- END WATCHDOG DUMP ---")
-            else:
-                last_epoch = self.sequencer.epoch_counter
-                stuck_time = 0
-
     def start(self) -> None:
         self.function_scheduler_task = asyncio.create_task(self.function_scheduler())
         self.function_scheduler_task.add_done_callback(self._task_exception_handler)
@@ -285,9 +264,6 @@ class AriaProtocol(BaseTransactionalProtocol):
         self.communication_task.add_done_callback(self._task_exception_handler)
         if self.migrating_state and USE_ASYNC_MIGRATION:
             self.migration_sender_task = asyncio.create_task(self._continuous_migration_sender())
-
-        self.watchdog_task = asyncio.create_task(self._epoch_watchdog())
-        
         logging.warning(
             f"Aria protocol started with operator partitions: {list(self.registered_operators.keys())}",
         )

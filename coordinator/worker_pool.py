@@ -71,18 +71,6 @@ class WorkerPool:
     def get_live_worker_ids(self) -> list[int]:
         return [worker.worker_id for worker in self.get_live_workers()]
 
-    def _get_worker_sort_key(self, w: Worker) -> tuple[int, int, int]:
-        active_partitions = [
-            op_part
-            for op_part, op in w.assigned_operators.items()
-            if not getattr(op, "is_shadow", False)
-        ]
-        if active_partitions:
-            min_part = min(op_part[1] for op_part in active_partitions)
-            return (0, min_part, w.worker_id)
-        else:
-            return (1, 0, w.worker_id)
-
     def reset_all_assignments(self) -> None:
         """
         Clears all operator assignments and rebuilds the priority queue.
@@ -90,8 +78,8 @@ class WorkerPool:
         This is useful for manual rebalance (e.g., after scaling up), where we want to
         redistribute partitions across *all* live workers.
         """
-        # Sort live workers dynamically so that active workers keep their partition assignments
-        live_workers = sorted(self.get_live_workers(), key=self._get_worker_sort_key)
+        # Make the live workers list deterministic by sorting by worker_id
+        live_workers = sorted(self.get_live_workers(), key=lambda w: w.worker_id)
         for w in live_workers:
             w.assigned_operators = {}
         self.operator_partition_to_worker.clear()
@@ -280,7 +268,7 @@ class WorkerPool:
         stateflow_graph: StateflowGraph,
     ) -> None:
         """Reassign all operator partitions round-robin across live workers NOT in exclude_ids"""
-        all_live = sorted(self.get_live_workers(), key=self._get_worker_sort_key)
+        all_live = sorted(self.get_live_workers(), key=lambda w: w.worker_id)
         survivors = [w for w in all_live if w.worker_id not in exclude_ids]
         if not survivors:
             logging.error("Reschedule excluding: no surviving workers - nothing to schedule")
