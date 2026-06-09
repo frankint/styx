@@ -1,5 +1,6 @@
 profile: step
 step_size: 5
-initial_round_length: 40
-regular_round_length: 60
-round_rates: [1000, 2000, 7000, 4000]
+initial_round_length: 20
+regular_round_length: 20
+round_rates: [5000, 7000, 9000, 15000, 7000, 5000]
+max_noise: 50

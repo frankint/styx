@@ -28,7 +28,7 @@ from graph import (
 import kafka_output_consumer
 from movie_data import movie_data
 import pandas as pd
-from styx.client import SyncStyxClient
+from styx.client.sync_client import SyncStyxClient
 from styx.common.local_state_backends import LocalStateBackend
 from styx.common.stateflow_graph import StateflowGraph
 from workload_data import charset, movie_titles
@@ -36,14 +36,14 @@ from workload_data import charset, movie_titles
 import os
 from datetime import datetime
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata, get_migration_times
+from export_metadata import MetadataParams, save_metadata, export_metrics
+from migration_tracker import MigrationTracker
 from load_generator import LoadSchedule
 
 threads = int(sys.argv[2])
 barrier = multiprocessing.Barrier(threads)
 N_PARTITIONS = int(sys.argv[3])
 messages_per_second = int(sys.argv[4])
-sleeps_per_second = 100
 sleep_time = 0.0085
 seconds = int(sys.argv[5])
 warmup_seconds = int(sys.argv[6])
@@ -196,6 +196,15 @@ def deathstar_init(styx: SyncStyxClient):
     print("Graph submitted")
 
 
+# Each client thread uses a disjoint request-key range so concurrent threads never
+# share keys on compose_review (and the frontend chain keyed by request id).
+REQUEST_KEY_STRIDE = 10**9
+
+
+def _request_key(proc_num: int, local_id: int) -> int:
+    return proc_num * REQUEST_KEY_STRIDE + local_id
+
+
 # -------------------------------------------------------------------------------------
 # Workload
 # -------------------------------------------------------------------------------------
@@ -209,19 +218,21 @@ def compose_review(c):
     return frontend_operator, c, "compose", (username, title, rating, text)
 
 
-def deathstar_workload_generator():
-    c = 0
+def deathstar_workload_generator(proc_num: int):
+    local_id = 0
     while True:
-        yield compose_review(c)
-        c += 1
+        yield compose_review(_request_key(proc_num, local_id))
+        local_id += 1
 
 
 def benchmark_runner(proc_num) -> dict[bytes, dict]:
     print(f"Generator: {proc_num} starting")
     styx = SyncStyxClient(STYX_HOST, STYX_PORT, kafka_url=KAFKA_URL)
+    time.sleep(proc_num * 0.2)
     styx.open(consume=False)
-    deathstar_generator = deathstar_workload_generator()
+    deathstar_generator = deathstar_workload_generator(proc_num)
     timestamp_futures: dict[bytes, dict] = {}
+    time.sleep(5)
     barrier.wait()
     start = timer()
     for second in range(seconds):
@@ -230,8 +241,10 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
             print("KILL -> styx-worker-1 done")
         sec_start = timer()
         current_tps = load_schedule.get_tps(second)
+        sleeps_per_second = 100 if current_tps > 100 else 1
+        step = max(1, current_tps // sleeps_per_second)
         for i in range(current_tps):
-            if i % (current_tps // sleeps_per_second) == 0:
+            if i % step == 0:
                 time.sleep(sleep_time)
             operator, key, func_name, params = next(deathstar_generator)
             future = styx.send_event(operator=operator,
@@ -245,7 +258,7 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
         if lps < 1:
             time.sleep(1 - lps)
         sec_end2 = timer()
-        print(f"{second} | TPS: {current_tps} | Latency: {sec_end2 - sec_start:.3f}s")
+        print(f" {datetime.now()} | {second} | TPS: {current_tps} | Latency: {sec_end2 - sec_start:.3f}s")
     end = timer()
     print(f"Average latency per second: {(end - start) / seconds}")
     styx.close()
@@ -285,6 +298,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if autoscaling_enabled:
+        tracker = MigrationTracker("http://localhost:8000/metrics")
+        tracker.start()
+
     start_time = time.time()
     main()
     end_time = time.time()
@@ -301,22 +318,29 @@ if __name__ == "__main__":
     )
 
     if autoscaling_enabled:
-        migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
+        migrations = tracker.stop()
+        print(f"Migrations: {migrations}")
     else:
-        migration_start_time = None
-        migration_end_time = None
-    
+        migrations = None
+
+    export_metrics(
+        save_dir=SAVE_DIR,
+        start_time=start_time,
+        end_time=end_time,
+        prometheus_url="http://localhost:9090",
+        step="1s",
+    )
+
     save_metadata(MetadataParams(
         workload="dmr",
         start=start_time,
         end=end_time,
+        migrations=migrations,
         out_path=SAVE_DIR,
         n_partitions=N_PARTITIONS,
-        messages_per_second=messages_per_second,
+        messages_per_second=messages_per_second * threads,
         n_keys=2000,
         seconds=seconds,
-        migration_start_time=migration_start_time,
-        migration_end_time=migration_end_time,
         epoch_size=epoch_size,
         warmup_seconds=warmup_seconds,
     ))

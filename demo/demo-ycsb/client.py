@@ -20,7 +20,8 @@ from styx.common.operator import Operator
 from styx.common.stateflow_graph import StateflowGraph
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata, get_migration_times
+from export_metadata import MetadataParams, save_metadata, export_metrics
+from migration_tracker import MigrationTracker
 from load_generator import LoadSchedule
 from tqdm import tqdm
 from ycsb import ycsb_operator
@@ -60,7 +61,7 @@ kill_at: int = int(sys.argv[13]) if len(sys.argv) > 13 else -1
 ####################################################################################################################
 g = StateflowGraph("ycsb-benchmark",
                    operator_state_backend=LocalStateBackend.DICT,
-                   max_operator_parallelism=N_PARTITIONS)
+                   max_operator_parallelism=N_PARTITIONS * 2)
 ycsb_operator.set_n_partitions(N_PARTITIONS)
 g.add_operators(ycsb_operator)
 
@@ -219,6 +220,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if autoscaling_enabled:
+        tracker = MigrationTracker("http://localhost:8000/metrics")
+        tracker.start()
+
     start_time = time.time()
     main()
     end_time = time.time()
@@ -239,18 +244,25 @@ if __name__ == "__main__":
     )
 
     if autoscaling_enabled:
-        migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
+        migrations = tracker.stop()
+        print(f"Migrations: {migrations}")
     else:
-        migration_start_time = None
-        migration_end_time = None
+        migrations = None
+
+    export_metrics(
+        save_dir=SAVE_DIR,
+        start_time=start_time,
+        end_time=end_time,
+        prometheus_url="http://localhost:9090",
+        step="1s",
+    )
     
     save_metadata(
         MetadataParams(
             workload="ycsb",
             start=start_time,
             end=end_time,
-            migration_start_time=migration_start_time,
-            migration_end_time=migration_end_time,
+            migrations=migrations,
             out_path=SAVE_DIR,
             n_partitions=N_PARTITIONS,
             messages_per_second=messages_per_second * threads,

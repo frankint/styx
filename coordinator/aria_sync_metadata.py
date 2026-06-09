@@ -1,10 +1,16 @@
+from collections import defaultdict
 from typing import Any
+
+from styx.common.logging import logging
+from styx.common.message_types import MessageType
 
 
 class AriaSyncMetadata:
     def __init__(self, n_workers: int) -> None:
         self.n_workers: int = n_workers
-        self.arrived: set[int] = set()
+        # Per-message-type arrival sets. Each barrier phase tracks its own arrivals
+        # so that concurrently-processed phases cannot contaminate each other's counts.
+        self.arrived: dict[MessageType, set[int]] = defaultdict(set)
         self.sent_proceed_msg: bool = False
         self.logic_aborts_everywhere: set[int] = set()
         self.concurrency_aborts_everywhere: set[int] = set()
@@ -16,8 +22,9 @@ class AriaSyncMetadata:
         self.stop_next_epoch: bool = False
         self.take_snapshot: bool = False
 
-    def check_distributed_barrier(self) -> bool:
-        return len(self.arrived) == self.n_workers
+    def check_distributed_barrier(self, mt: MessageType) -> bool:
+        # logging.warning(f"Arrived workers: {self.arrived[mt]} and n_workers: {self.n_workers}")
+        return len(self.arrived[mt]) == self.n_workers
 
     def stop_in_next_epoch(self) -> None:
         self.stop_next_epoch = True
@@ -30,9 +37,10 @@ class AriaSyncMetadata:
         worker_id: int,
         workers_logic_aborts: set[int],
     ) -> bool:
-        self.arrived.add(worker_id)
+        logging.debug(f"AriaSyncMetadata: set_aria_processing_done: worker_id={worker_id}")
+        self.arrived[MessageType.AriaProcessingDone].add(worker_id)
         self.logic_aborts_everywhere.update(workers_logic_aborts)
-        return self.check_distributed_barrier()
+        return self.check_distributed_barrier(MessageType.AriaProcessingDone)
 
     def set_aria_commit_done(
         self,
@@ -41,15 +49,17 @@ class AriaSyncMetadata:
         remote_t_counter: int,
         processed_seq_size: int,
     ) -> bool:
-        self.arrived.add(worker_id)
+        logging.debug(f"AriaSyncMetadata: set_aria_commit_done: worker_id={worker_id}")
+        self.arrived[MessageType.AriaCommit].add(worker_id)
         self.concurrency_aborts_everywhere.update(aborted)
         self.processed_seq_size += processed_seq_size
         self.max_t_counter = max(self.max_t_counter, remote_t_counter)
-        return self.check_distributed_barrier()
+        return self.check_distributed_barrier(MessageType.AriaCommit)
 
-    def set_empty_sync_done(self, worker_id: int) -> bool:
-        self.arrived.add(worker_id)
-        return self.check_distributed_barrier()
+    def set_empty_sync_done(self, mt: MessageType, worker_id: int) -> bool:
+        logging.debug(f"AriaSyncMetadata: set_empty_sync_done: worker_id={worker_id}")
+        self.arrived[mt].add(worker_id)
+        return self.check_distributed_barrier(mt)
 
     def set_deterministic_reordering_done(
         self,
@@ -58,7 +68,7 @@ class AriaSyncMetadata:
         remote_write_set: dict[str, dict[Any, set[Any] | dict[Any, Any]]],
         remote_read_set: dict[str, dict[Any, set[Any] | dict[Any, Any]]],
     ) -> bool:
-        self.arrived.add(worker_id)
+        self.arrived[MessageType.DeterministicReordering].add(worker_id)
         if self.global_read_reservations is None:
             self.global_read_reservations = remote_read_reservation
             self.global_write_set = remote_write_set
@@ -76,7 +86,7 @@ class AriaSyncMetadata:
                 remote_read_set,
                 self.global_read_set,
             )
-        return self.check_distributed_barrier()
+        return self.check_distributed_barrier(MessageType.DeterministicReordering)
 
     @staticmethod
     def __merge_rw_sets(
@@ -121,17 +131,20 @@ class AriaSyncMetadata:
                 output_dict[namespace] = d2[namespace]
         return output_dict
 
-    def cleanup(self, epoch_end: bool = False, take_snapshot: bool = False) -> None:
-        self.arrived.clear()
-        self.logic_aborts_everywhere: set[int] = set()
-        self.sent_proceed_msg: bool = False
-        self.concurrency_aborts_everywhere: set[int] = set()
-        self.processed_seq_size: int = 0
-        self.max_t_counter: int = -1
-        self.global_read_reservations: None | dict = None
-        self.global_write_set: None | dict = None
-        self.global_read_set: None | dict = None
-        if epoch_end:
-            self.stop_next_epoch = False
-        if take_snapshot:
+    def reset(self, mt: MessageType) -> None:
+        """Reset the state owned by a single barrier phase."""
+        self.arrived[mt] = set()
+        if mt == MessageType.AriaProcessingDone:
+            self.logic_aborts_everywhere = set()
+            self.sent_proceed_msg = False
+        elif mt == MessageType.AriaCommit:
+            self.concurrency_aborts_everywhere = set()
+            self.processed_seq_size = 0
+            self.max_t_counter = -1
             self.take_snapshot = False
+        elif mt == MessageType.DeterministicReordering:
+            self.global_read_reservations = None
+            self.global_write_set = None
+            self.global_read_set = None
+        elif mt == MessageType.SyncCleanup:
+            self.stop_next_epoch = False

@@ -7,7 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "cityhash==0.4.10",
     "cloudpickle==3.1.2",
-    "confluent-kafka==2.13.0",
+    "confluent-kafka==2.14.0",
     "geopy>=2.4.1",
     "minio==7.2.20",
     "msgspec==0.20.0",

@@ -234,19 +234,15 @@ wheels = [
 
 [[package]]
 name = "confluent-kafka"
-version = "2.13.0"
+version = "2.14.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b4/d0/1f5055331fa660225de6829b143e6f083913f0a96481134a91390bad62c1/confluent_kafka-2.13.0.tar.gz", hash = "sha256:eff7a4391a9e6d4a33f0c05d0935b200a7463834f1f5d6e6253be318f910babd", size = 273621, upload-time = "2026-01-05T10:25:08.078Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/40/52/2c71d8e0b2de51076f90cea05342dc9c20fa14ded11992827680db4bbdfa/confluent_kafka-2.14.0.tar.gz", hash = "sha256:34efddfd06766d1153d10a70c23a98f6035e253a906db8ed04cb0249fc3b0fd2", size = 287868, upload-time = "2026-04-02T11:28:57.862Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/06/3f/c2120c002f85c5401d8ea29558acf041ad968b33cfca83916a7c0a740d53/confluent_kafka-2.13.0-cp314-cp314-macosx_13_0_arm64.whl", hash = "sha256:d448537147a33dd8c17656732989ddfe1d4a25a40bcb5f59bc63dc0a5041dd83", size = 3195696, upload-time = "2026-01-05T10:24:14.422Z" },
-    { url = "https://files.pythonhosted.org/packages/35/b9/da4ef8fca4cbc76b6040a97a92085c09c0f23c42424989a2d68cec42c8d6/confluent_kafka-2.13.0-cp314-cp314-macosx_13_0_x86_64.whl", hash = "sha256:1325585f9fc283c32c30df4226178dc89cf43d00f5c240e1f77ddedc94573690", size = 3634632, upload-time = "2026-01-05T10:24:16.575Z" },
-    { url = "https://files.pythonhosted.org/packages/09/ed/c7d5cc3c57aec126ffb12ffa5f4584acd264446a4117db3ad2dd69e47afe/confluent_kafka-2.13.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:266bbea18ce99f6e77ce0e9a118f353447c8705792ef5745eabcc5c6db08794a", size = 3720650, upload-time = "2026-01-05T10:24:18.657Z" },
-    { url = "https://files.pythonhosted.org/packages/c3/2b/0a93b63a46b2ceaac3de92d494e32aab21bec398b40ac89108bbaa6894c3/confluent_kafka-2.13.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:7a373a1a3dd8e02dd218946583e951791480921fd777faeaf601c2834e2a6c0d", size = 3977364, upload-time = "2026-01-05T10:24:23.677Z" },
-    { url = "https://files.pythonhosted.org/packages/46/00/80ea6872421c4e30e033e035e5bdcf44c054993d5721623841c59b5f04c1/confluent_kafka-2.13.0-cp314-cp314-win_amd64.whl", hash = "sha256:da956b2141d9f425dbfc3cf1c244ef6d0633b83fc5ceada6f496099258e63a68", size = 4271874, upload-time = "2026-01-05T10:24:26.265Z" },
-    { url = "https://files.pythonhosted.org/packages/fc/1a/e6fe016bea63343010f485a1ecebfdc00d9b6e95ef6fe52a1d7793c0339c/confluent_kafka-2.13.0-cp314-cp314t-macosx_13_0_arm64.whl", hash = "sha256:fa354e9fb95e26545decd429477072ea3a98a2e7acac11d09156772e06f14680", size = 3194480, upload-time = "2026-01-05T10:24:28.515Z" },
-    { url = "https://files.pythonhosted.org/packages/fb/54/c9668f214f2e736e51e2874053fe1ebcb8784425fefcfd6fd0d384dc5dcf/confluent_kafka-2.13.0-cp314-cp314t-macosx_13_0_x86_64.whl", hash = "sha256:e256dc3a993bf5fde0fa4a1b6a5b72e3521cedbc9dc4d7a65f159afa4b72e5b4", size = 3632866, upload-time = "2026-01-05T10:24:30.689Z" },
-    { url = "https://files.pythonhosted.org/packages/13/f5/83e989962077003d91ba249158c7a1e21696604c301b3680fcbb427005d0/confluent_kafka-2.13.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:eb7988038b7f13ea490af93b9165ed40a3f385fb91e99ce8dacee8890e36e48a", size = 3718956, upload-time = "2026-01-05T10:24:33.035Z" },
-    { url = "https://files.pythonhosted.org/packages/b8/84/1aaa5cfe1695f02d11e02ef39f180567780348b1f3e1161575f002a207fe/confluent_kafka-2.13.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:cfd8f011b0b0a109f8747312dba6cee45b39fb53fc7d53f28813bce84a91228d", size = 3976235, upload-time = "2026-01-05T10:24:35.122Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/07/e217beea9a543c53484144164db337b33ec7f95912cc76f09f03fbc6ee7f/confluent_kafka-2.14.0-cp314-cp314-macosx_13_0_arm64.whl", hash = "sha256:05bbf9745cadb1a6fd3b03508572d2cd5455d8d9960a437537ddac9d3f89ee49", size = 3212541, upload-time = "2026-04-02T11:28:28.882Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/73/cbb44df7afa3ac8746e0ebc37be5f457d0e91e32648c144226da26c5f682/confluent_kafka-2.14.0-cp314-cp314-macosx_13_0_x86_64.whl", hash = "sha256:32a72ff85d7b4428532aa477b8dfa4223a5c69f4e90fecaa64e1924cc99a06b6", size = 3653993, upload-time = "2026-04-02T11:28:31.042Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/49/49d9e62ff70a06e68c96dd65d8e621583e6b51682ccc08051ec585bfdf96/confluent_kafka-2.14.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:4fd75d53e0e36f7ff9c5454f7a3cf4a54790db3bfda169c3b582ddc97111f6f6", size = 3739535, upload-time = "2026-04-02T11:28:32.844Z" },
+    { url = "https://files.pythonhosted.org/packages/33/6a/df467787418c24e063ed0c19e96aedf05c26eabc32d8adc75235d45d830b/confluent_kafka-2.14.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:eb17528ec7b177ec5e38214852f3dadb5d77172e0fb25c7c992c0cbc3dcfbaa2", size = 3995845, upload-time = "2026-04-02T11:28:34.538Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/0a/c5ce2a48ece0ae2dd050ab28d4cd81b9efc610276a4e72f622582f5371d3/confluent_kafka-2.14.0-cp314-cp314-win_amd64.whl", hash = "sha256:578afb532ded604cb98174a14a88847367191bcbe4f52a1661f5238dc5cf75dd", size = 4290326, upload-time = "2026-04-02T11:28:36.679Z" },
 ]
 
 [[package]]
@@ -274,7 +270,7 @@ requires-dist = [
     { name = "chronos-forecasting", specifier = "==2.2.2" },
     { name = "cityhash", specifier = "==0.4.10" },
     { name = "cloudpickle", specifier = "==3.1.2" },
-    { name = "confluent-kafka", specifier = "==2.13.0" },
+    { name = "confluent-kafka", specifier = "==2.14.0" },
     { name = "geopy", specifier = ">=2.4.1" },
     { name = "minio", specifier = "==7.2.20" },
     { name = "msgspec", specifier = "==0.20.0" },
@@ -1066,7 +1062,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.42.59" },
     { name = "cityhash", specifier = ">=0.4.10,<1.0.0" },
     { name = "cloudpickle", specifier = ">=3.1.2,<4.0.0" },
-    { name = "confluent-kafka", specifier = ">=2.13.0,<2.14" },
+    { name = "confluent-kafka", specifier = ">=2.14.0,<3.0.0" },
     { name = "msgspec", specifier = ">=0.20.0,<1.0.0" },
     { name = "zstandard", specifier = ">=0.25.0,<1.0.0" },
 ]

@@ -30,6 +30,7 @@ import contextlib
 
 from aiokafka import AIOKafkaConsumer, TopicPartition
 from aiokafka.errors import KafkaConnectionError, UnknownTopicOrPartitionError
+from styx.common.base_networking import SOCKET_RCV_BUF, SOCKET_SND_BUF
 from styx.common.local_state_backends import LocalStateBackend
 from styx.common.logging import logging
 from styx.common.message_types import MessageType
@@ -87,8 +88,8 @@ class Worker:
             struct.pack("ii", 1, 0),
         )  # Enable LINGER, timeout 0
         self.worker_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.worker_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
-        self.worker_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        self.worker_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_SND_BUF)
+        self.worker_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_RCV_BUF)
         self.worker_socket.bind(("0.0.0.0", self.server_port))  # noqa: S104
         self.worker_socket.setblocking(False)
 
@@ -99,16 +100,8 @@ class Worker:
             struct.pack("ii", 1, 0),
         )  # Enable LINGER, timeout 0
         self.protocol_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.protocol_socket.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_SNDBUF,
-            1024 * 1024,
-        )
-        self.protocol_socket.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_RCVBUF,
-            1024 * 1024,
-        )
+        self.protocol_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_SND_BUF)
+        self.protocol_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_RCV_BUF)
         self.protocol_socket.bind(("0.0.0.0", self.protocol_port))  # noqa: S104
         self.protocol_socket.setblocking(False)
 
@@ -134,7 +127,6 @@ class Worker:
         self.function_execution_protocol: AriaProtocol | None = None
 
         self.aio_task_scheduler = AIOTaskScheduler()
-        self.protocol_task_scheduler = AIOTaskScheduler()
 
         self.async_snapshots: AsyncSnapshotsS3 | None = None
         self.protocol_task: asyncio.Task | None = None
@@ -160,12 +152,6 @@ class Worker:
         self._pending_hash_metadata: dict[OperatorPartition, dict[Any, tuple[int, int]]] = defaultdict(dict)
         self._pending_migration_data: bytes | None = None
         self.migration_error: BaseException | None = None
-
-        self.networking_locks: dict[MessageType, asyncio.Lock] = {
-            MessageType.ReceiveMigrationHashes: asyncio.Lock(),
-            MessageType.ReceiveRemoteKey: asyncio.Lock(),
-            MessageType.RequestRemoteKey: asyncio.Lock(),
-        }
 
         # Bounded queues for backpressure
         # - protocol_queue: for protocol TCP messages
@@ -301,9 +287,12 @@ class Worker:
             )
 
     def _ensure_local_state_partitions(self) -> None:
-        for op_part in set(self.registered_operators.keys()):
+        owned = set(self.registered_operators.keys())
+        for op_part in owned:
             if op_part not in self.local_state.operator_partitions:
                 self.local_state.add_new_operator_partition(op_part)
+        # Mark these as owned so the async-migration cleanup keeps them even if empty.
+        self.local_state.set_owned_partitions(owned)
 
     # -----------------------
     # Handlers
@@ -614,58 +603,73 @@ class Worker:
         data: bytes,
         msg_type: MessageType,
     ) -> None:
+        # Lock-free: add_remote_keys is sync; single-threaded asyncio gives atomicity.
+        del msg_type
         n_op, payload = self.networking.decode_message(data)
-        async with self.networking_locks[msg_type]:
-            if self._is_standby():
-                logging.warning("MIGRATION | ReceiveMigrationHashes on standby — state not yet initialized, skipping")
-                return
-            logging.warning(f"MIGRATION | ReceiveMigrationHashes received {n_op} keys")
-            self.local_state.add_remote_keys(n_op, payload)
+        if self._is_standby():
+            logging.warning("MIGRATION | ReceiveMigrationHashes on standby — state not yet initialized, skipping")
+            return
+        logging.warning(f"MIGRATION | ReceiveMigrationHashes received {n_op} keys")
+        self.local_state.add_remote_keys(n_op, payload)
 
     async def _handle_request_remote_key(
         self,
         data: bytes,
         msg_type: MessageType,
     ) -> None:
+        # Lock-free: pop() is atomic in CPython; concurrent requests for the same
+        # key are race-safe (loser gets None, which the requester handles).
+        del msg_type
         operator_partition, key, old_partition, host, port = self.networking.decode_message(data)
-        async with self.networking_locks[msg_type]:
-            if self._is_standby():
-                value = None
-            else:
-                value = self.local_state.get_key_to_migrate(
-                    operator_partition,
-                    key,
-                    old_partition,
-                )
-            await self.networking.send_message(
-                host,
-                port,
-                msg=(operator_partition, key, value),
-                msg_type=MessageType.ReceiveRemoteKey,
-                serializer=Serializer.MSGPACK,
+        if self._is_standby():
+            value = None
+        else:
+            value = self.local_state.get_key_to_migrate(
+                operator_partition,
+                key,
+                old_partition,
             )
+        await self.networking.send_message(
+            host,
+            port,
+            msg=(operator_partition, key, value),
+            msg_type=MessageType.ReceiveRemoteKey,
+            serializer=Serializer.MSGPACK,
+        )
 
     async def _handle_receive_remote_key(
         self,
         data: bytes,
         msg_type: MessageType,
     ) -> None:
+        # Lock-free: no awaits.
+        del msg_type
         operator_partition, key, value = self.networking.decode_message(data)
-        async with self.networking_locks[msg_type]:
-            if self._is_standby():
-                logging.warning("MIGRATION | ReceiveRemoteKey on standby — state not yet initialized, skipping")
-                return
+        if self._is_standby():
+            logging.warning("MIGRATION | ReceiveRemoteKey on standby — state not yet initialized, skipping")
+            return
+
+        op = tuple(operator_partition)
+        if value is not None:
             self.local_state.set_data_from_migration(operator_partition, key, value)
-            # Guard: the event may have been already signaled by the async
-            # migration handler, or may not exist if no transaction requested it.
-            op = tuple(operator_partition)
-            if value is None:
-                return
-            if (
-                op in self.protocol_networking.wait_remote_key_event
-                and key in self.protocol_networking.wait_remote_key_event[op]
-            ):
-                self.protocol_networking.key_received(op, key)
+            should_signal = True
+        else:
+            logging.warning(f"MIGRATION | ReceiveRemoteKey received None for {operator_partition} {key}")
+            op_name, partition = operator_partition
+            in_data = op in self.local_state.data and key in self.local_state.data[op]
+            in_remote = self.local_state.in_remote_keys(key, op_name, partition)
+            if in_data:
+                should_signal = True  # batch already delivered
+            elif in_remote:
+                should_signal = False  # async in flight — batch handler will signal
+            else:
+                should_signal = True  # source has nothing; treat as absent
+
+        if should_signal and (
+            op in self.protocol_networking.wait_remote_key_event
+            and key in self.protocol_networking.wait_remote_key_event[op]
+        ):
+            self.protocol_networking.key_received(op, key)
 
     async def _handle_migration_repartitioning_done(
         self,
@@ -751,7 +755,9 @@ class Worker:
                 f"MIGRATION | PHASE B Runtime rebuilt | took: {t_deploy_end - t_deploy_start}",
             )
 
-            # 9. Start protocol with background migration
+            # 9. Start protocol with background migration.
+            # If this worker ended up with no partitions (scale-down victim),
+            # start() will skip the function_scheduler but migration sender still runs
             self.function_execution_protocol.start()
             self.function_execution_protocol.started.set()
             if not self.registered_operators:
@@ -951,7 +957,13 @@ class Worker:
         while True:
             message: bytes = await self.control_queue.get()
             try:
-                self.aio_task_scheduler.create_task(self.worker_controller(message))
+                # Unbounded: control-plane handlers can suspend on cross-handler
+                # events (e.g. `_handle_migration_repartitioning_done` awaits
+                # `migration_completed` set by `_handle_migration_done`). A
+                # bounded scheduler would let suspended handlers hog slots and
+                # starve the setter. Control volume is low so no backpressure
+                # cost.
+                self.aio_task_scheduler.create_unbounded_task(self.worker_controller(message))
             except Exception as e:
                 logging.error(f"Error while processing control-plane message: {e}")
             finally:
@@ -959,19 +971,29 @@ class Worker:
 
     async def protocol_queue_worker(self) -> None:
         """
-        Worker that pulls protocol messages from the bounded queue and
-        hands them to the function_execution_protocol. This is where
-        backpressure terminates for the protocol path.
+        Worker that pulls protocol messages from the bounded queue and looks
+        up the matching handler inline.
+
+        Concurrency is bounded by `PROTOCOL_WORKERS`: each worker handles one
+        message at a time. Compared to dispatching through
+        `protocol_tcp_controller`, inlining the lookup saves one coroutine
+        allocation per message — measurable in py-spy at high tx/s.
+        Handlers with internal awaits (e.g. `_handle_unlock`) still get
+        drained by the other workers in the pool.
         """
         while True:
             message: bytes = await self.protocol_queue.get()
             try:
-                if self.function_execution_protocol is not None:
-                    self.protocol_task_scheduler.create_task(
-                        self.function_execution_protocol.protocol_tcp_controller(
-                            message,
-                        ),
-                    )
+                proto = self.function_execution_protocol
+                if proto is not None:
+                    msg_type = proto.networking.get_msg_type(message)
+                    handler = proto.protocol_handlers_map.get(msg_type)
+                    if handler is None:
+                        logging.error(
+                            f"Aria protocol: Non supported command message type: {msg_type}",
+                        )
+                    else:
+                        await handler(message)
                 else:
                     msg_type = self.protocol_networking.get_msg_type(message)
                     logging.debug(

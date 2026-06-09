@@ -1,5 +1,4 @@
 import asyncio
-import fractions
 from typing import TYPE_CHECKING
 
 from styx.common.function import Function
@@ -38,7 +37,6 @@ class StatefulFunction(Function):
         t_id: int,
         request_id: bytes,
         fallback_mode: bool,
-        use_fallback_cache: bool,
         deployed_graph: StateflowGraph,
         operator_lock: asyncio.Lock,
         protocol: BaseTransactionalProtocol,
@@ -56,7 +54,6 @@ class StatefulFunction(Function):
             t_id (int): Transaction ID.
             request_id (bytes): Unique identifier for this function invocation.
             fallback_mode (bool): Whether to enable fallback (recovery) logic.
-            use_fallback_cache (bool): Whether to use cached fallback results.
             partitioner (BasePartitioner): The partitioning strategy.
             protocol (BaseTransactionalProtocol): Protocol for function invocation.
         """
@@ -69,21 +66,19 @@ class StatefulFunction(Function):
         self.__request_id: bytes = request_id
         self.__async_remote_calls: list[tuple[str, str, int, object, tuple, bool]] = []
         self.__fallback_enabled: bool = fallback_mode
-        self.__use_fallback_cache: bool = use_fallback_cache
         self.__key = key
         self.__protocol = protocol
         self.__partition = partition
         self.__deployed_graph = deployed_graph
         self.__operator_lock: asyncio.Lock = operator_lock
 
-    async def __call__(self, *args, **kwargs) -> tuple[object, int, int]:  # noqa: ANN002, ANN003
+    async def __call__(self, *args, **kwargs) -> tuple[object, int]:  # noqa: ANN002, ANN003
         """
         Executes the wrapped function and triggers asynchronous remote calls if needed.
 
         Returns:
-            (result, n_remote_calls, partial_node_count) on success
-            ("WrongPartition", -1, -1) if the key was in local state but now has been sent to a remote worker
-            (exception, -1, -1) on failure
+            (result, n_remote_calls) on success
+            (exception, -1) on failure
         """
         try:
             # 1) Decide whether we need to fetch/migrate the key, while holding the lock briefly.
@@ -151,23 +146,16 @@ class StatefulFunction(Function):
             async with self.__operator_lock:
                 res = await self.run(*args)
 
-            # 4) Fallback cache short-circuit.
-            if self.__fallback_enabled and self.__use_fallback_cache:
-                return res, len(self.__async_remote_calls), -1
-
-            # 5) Chain / async remote calls.
-            partial_node_count = 0
+            # 4) Chain / async remote calls.
             n_remote_calls = 0
 
             if "ack_share" in kwargs and "ack_host" in kwargs:
                 # Middle of the chain
-                partial_node_count = kwargs.get("partial_node_count", 0)
                 n_remote_calls = await self.__send_async_calls(
                     ack_host=kwargs["ack_host"],
                     ack_port=kwargs["ack_port"],
                     ack_share=kwargs["ack_share"],
                     chain_participants=kwargs["chain_participants"],
-                    partial_node_count=partial_node_count,
                 )
             elif self.__async_remote_calls:
                 # Start of the chain
@@ -176,7 +164,6 @@ class StatefulFunction(Function):
                     ack_port=-1,
                     ack_share=1,
                     chain_participants=[],
-                    partial_node_count=partial_node_count,
                     is_root=True,
                 )
 
@@ -188,11 +175,11 @@ class StatefulFunction(Function):
                 f"key={self.__key}, "
                 f"in_remote_keys={self.__state.in_remote_keys(self.__key, self.__operator_name, self.__partition)}, "
                 f"operator_partitions={self.__state.operator_partitions}, "
-                f"keys_sent={self.__state.keys_sent}, "
+                # f"keys_sent={self.__state.keys_sent}, "
             )
-            return e, -1, -1
+            return e, -1
         else:
-            return res, n_remote_calls, partial_node_count
+            return res, n_remote_calls
 
     @property
     def data(self) -> dict[K, V]:
@@ -270,7 +257,6 @@ class StatefulFunction(Function):
         ack_port: int,
         ack_share: int,
         chain_participants: list[int],
-        partial_node_count: int,
         is_root: bool = False,
     ) -> int:
         """Sends all pending asynchronous remote function calls.
@@ -280,7 +266,6 @@ class StatefulFunction(Function):
             ack_port: Port for acknowledgement callbacks.
             ack_share: Fractional contribution for chain tracking.
             chain_participants (list[int]): Workers involved in this chain.
-            partial_node_count (int): Partial chain node count.
             is_root (bool, optional): Whether this function is the chain root.
 
         Returns:
@@ -289,28 +274,33 @@ class StatefulFunction(Function):
         n_remote_calls: int = len(self.__async_remote_calls)
         if n_remote_calls == 0:
             return n_remote_calls
-        # if fallback is enabled there is no need to call the functions because they are already cached
-        new_share_fraction: str = str(fractions.Fraction(ack_share) / n_remote_calls)
+        # Chain-ACK share — float arithmetic is ~100x cheaper than Fraction.
+        # The string round-trip preserves wire compatibility with the existing
+        # `_handle_ack` / `add_ack_fraction_str` decoder.
+        new_share_fraction: str = repr(float(ack_share) / n_remote_calls)
         if is_root:
             # This is the root
             ack_host = self.__networking.host_name
             ack_port = self.__networking.host_port
             self.__networking.prepare_function_chain(self.__t_id)
-        else:
-            if not self.__networking.in_the_same_network(ack_host, ack_port):
-                chain_participants.append(self.__networking.worker_id)
-            partial_node_count += 1
+        elif not self.__networking.in_the_same_network(ack_host, ack_port):
+            chain_participants.append(self.__networking.worker_id)
+        # Every call in this chain step shares the same ack metadata; build
+        # the tuple once instead of allocating one per entry.
+        ack_payload: tuple[str, int, int, str, list[int]] = (
+            ack_host,
+            ack_port,
+            self.__t_id,
+            new_share_fraction,
+            chain_participants,
+        )
+        # Bucket remote (off-worker) calls by peer so we can send one
+        # RunFunRemoteBatch per peer instead of one RunFunRemote per call.
+        # Local calls still dispatch directly into the in-process protocol.
         remote_calls: list[Awaitable] = []
+        remote_batches: dict[tuple[str, int], list[tuple]] = {}
         for entry in self.__async_remote_calls:
             operator_name, function_name, partition, key, params, is_local = entry
-            ack_payload: tuple[str, int, int, str, list[int], int] = (
-                ack_host,
-                ack_port,
-                self.__t_id,
-                new_share_fraction,
-                chain_participants,
-                partial_node_count,
-            )
             if is_local:
                 payload = RunFuncPayload(
                     request_id=self.__request_id,
@@ -322,32 +312,49 @@ class StatefulFunction(Function):
                     ack_payload=ack_payload,
                 )
                 if self.__fallback_enabled:
-                    # and no cache
+                    # internal=True: this is a chain participant, not the root.
+                    # The root is already running run_fallback_function for this
+                    # t_id and awaiting waited_ack_events[t_id]; if we entered
+                    # the non-internal path here we'd recursively wait on the
+                    # same event from inside the gather that's supposed to set
+                    # it, deadlocking fallback.
                     remote_calls.append(
                         self.__protocol.run_fallback_function(
                             t_id=self.__t_id,
                             payload=payload,
+                            internal=True,
                         ),
                     )
                 else:
                     remote_calls.append(
                         self.__protocol.run_function(t_id=self.__t_id, payload=payload),
                     )
-                    # add to cache
-                    self.__networking.add_remote_function_call(self.__t_id, payload)
             else:
-                remote_calls.append(
-                    self.__call_remote_function_no_response(
-                        operator_name=operator_name,
-                        function_name=function_name,
-                        key=key,
-                        partition=partition,
-                        params=params,
-                        ack_payload=ack_payload,
-                    ),
+                wire_payload, peer_host, peer_port = self.__prepare_message_transmission(
+                    operator_name,
+                    key,
+                    function_name,
+                    partition,
+                    params,
+                    ack_payload,
                 )
-            partial_node_count = 0
-        await asyncio.gather(*remote_calls)
+                remote_batches.setdefault((peer_host, peer_port), []).append(wire_payload)
+        for (peer_host, peer_port), batch in remote_batches.items():
+            remote_calls.append(
+                self.__networking.send_message(
+                    peer_host,
+                    peer_port,
+                    msg=batch,
+                    msg_type=MessageType.RunFunRemoteBatch,
+                    serializer=Serializer.MSGPACK,
+                ),
+            )
+        # Many chain stages have exactly one downstream call (e.g. NewOrder's
+        # warehouse → district hop). Skip the `gather` machinery in that case.
+        if len(remote_calls) == 1:
+            await remote_calls[0]
+        else:
+            await asyncio.gather(*remote_calls)
         return n_remote_calls
 
     def __get_partition(self, operator_name: str, key: K) -> int:
@@ -386,7 +393,7 @@ class StatefulFunction(Function):
         key: K,
         partition: int,
         params: tuple = (),
-        ack_payload: tuple[str, int, int, str, list[int], int] | None = None,
+        ack_payload: tuple[str, int, int, str, list[int]] | None = None,
     ) -> None:
         """Sends a remote function call without expecting a response.
 
@@ -423,7 +430,7 @@ class StatefulFunction(Function):
         function_name: str,
         partition: int,
         params: tuple,
-        ack_payload: tuple[str, int, int, str, list[int], int] | None = None,
+        ack_payload: tuple[str, int, int, str, list[int]] | None = None,
     ) -> tuple[tuple[int, bytes, str, str, K, int, bool, tuple], str, int] | None:
         """Prepares the payload and routing details for a remote function call.
 
@@ -439,18 +446,31 @@ class StatefulFunction(Function):
             tuple: (payload, operator_host, operator_port)
         """
         try:
-            payload = (
-                self.__t_id,  # __T_ID__
-                self.__request_id,  # __RQ_ID__
-                operator_name,  # __OP_NAME__
-                function_name,  # __FUN_NAME__
-                key,  # __KEY__
-                partition,  # __PARTITION__
-                self.__fallback_enabled,
-                params,
-            )  # __PARAMS__
-            if ack_payload is not None:
-                payload += (ack_payload,)
+            # Single-shot tuple build: avoids the `payload += (ack_payload,)`
+            # re-allocation on every remote call.
+            if ack_payload is None:
+                payload = (
+                    self.__t_id,  # __T_ID__
+                    self.__request_id,  # __RQ_ID__
+                    operator_name,  # __OP_NAME__
+                    function_name,  # __FUN_NAME__
+                    key,  # __KEY__
+                    partition,  # __PARTITION__
+                    self.__fallback_enabled,
+                    params,  # __PARAMS__
+                )
+            else:
+                payload = (
+                    self.__t_id,
+                    self.__request_id,
+                    operator_name,
+                    function_name,
+                    key,
+                    partition,
+                    self.__fallback_enabled,
+                    params,
+                    ack_payload,
+                )
             operator_host = self.__dns[operator_name][partition][0]
             operator_port = self.__dns[operator_name][partition][2]
         except KeyError:

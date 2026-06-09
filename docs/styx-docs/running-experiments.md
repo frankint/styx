@@ -8,7 +8,7 @@ This guide covers how to run Styx benchmark experiments in all supported deploym
 
 | Mode | Description |
 |------|-------------|
-| `docker-compose` | Local cluster using Docker Compose. Default for migration/scalability scripts. |
+| `docker-compose` | Local cluster using Docker Compose. Default for experiment, migration, and scalability scripts. |
 | `k8s-minikube` | Kubernetes via minikube. Builds and loads images locally. |
 | `k8s-cluster` | Generic Kubernetes cluster (e.g. on-prem or cloud). Uses pre-published images. |
 
@@ -31,6 +31,11 @@ The mode is controlled by the `DEPLOY_MODE` environment variable.
 | Tool | Purpose |
 |------|---------|
 | Docker + Docker Compose | Running the full Styx stack locally |
+
+The docker-compose scripts call `scripts/start_styx_cluster.sh`, which runs
+`docker system prune -f --volumes` before starting a fresh local cluster. This
+removes unused Docker objects and volumes from your Docker host, not just Styx
+containers.
 
 ### k8s-minikube mode
 
@@ -105,7 +110,7 @@ sudo kubefwd --version
   <workload_name> <input_rate> <n_keys> <n_part> <zipf_const> \
   <client_threads> <total_time> <saving_dir> <warmup_seconds> <epoch_size> \
   [styx_threads_per_worker] [enable_compression] [use_composite_keys] \
-  [use_fallback_cache] [regenerate_tpcc_data]
+  [regenerate_tpcc_data]
 ```
 
 ### Parameters
@@ -123,16 +128,15 @@ sudo kubefwd --version
 | 9 | `warmup_seconds` | Seconds excluded from metrics |
 | 10 | `epoch_size` | Max transactions per Aria epoch (e.g. `1000`) |
 | 11 _(optional)_ | `styx_threads_per_worker` | Worker threads per container (default: `1`) |
-| 12 _(optional)_ | `enable_compression` | `true`/`false` — ZSTD snapshot compression (default: `true`) |
-| 13 _(optional)_ | `use_composite_keys` | `true`/`false` — composite key hashing (default: `true`) |
-| 14 _(optional)_ | `use_fallback_cache` | `true`/`false` — fallback result cache (default: `true`) |
-| 15 _(optional)_ | `regenerate_tpcc_data` | `true`/`false` — force TPC-C data regeneration (default: `false`) |
+| 12 _(optional)_ | `enable_compression` | `true`/`false` — compress large MessagePack-serialized internal TCP messages with Zstandard (default: `true`) |
+| 13 _(optional)_ | `use_composite_keys` | `true`/`false` — honor operator `composite_key_hash_params` when partitioning keys (default: `true`) |
+| 14 _(optional)_ | `regenerate_tpcc_data` | `true`/`false` — force TPC-C data regeneration (default: `false`) |
 
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEPLOY_MODE` | `k8s-minikube` | Deployment mode: `docker-compose`, `k8s-minikube`, `k8s-cluster` |
+| `DEPLOY_MODE` | `docker-compose` | Deployment mode: `docker-compose`, `k8s-minikube`, `k8s-cluster` |
 | `RELEASE_NAME` | `styx-cluster` | Helm release name (k8s modes) |
 | `NAMESPACE` | `styx` | Kubernetes namespace (k8s modes) |
 
@@ -220,7 +224,7 @@ Runs a benchmark in which the number of partitions is scaled (up or down) mid-ex
   <total_time> <saving_dir> <warmup_seconds> <epoch_size> \
   <workload_name> <n_keys> \
   [regenerate_tpcc_data] [styx_threads_per_worker] \
-  [enable_compression] [use_composite_keys] [use_fallback_cache]
+  [enable_compression] [use_composite_keys]
 ```
 
 ### Workloads

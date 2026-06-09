@@ -4,7 +4,6 @@ set -eo pipefail
 styx_threads_per_worker=1
 enable_compression=true
 use_composite_keys=true
-use_fallback_cache=true
 regenerate_tpcc_data=false
 
 workload_name=$1
@@ -21,8 +20,7 @@ workload_profile=${11}
 [ -n "${12}" ] && styx_threads_per_worker=${12}
 [ -n "${13}" ] && enable_compression=${13}
 [ -n "${14}" ] && use_composite_keys=${14}
-[ -n "${15}" ] && use_fallback_cache=${15}
-[ -n "${16}" ] && regenerate_tpcc_data=${16}
+[ -n "${15}" ] && regenerate_tpcc_data=${15}
 kill_at="-1" # This means that we are not going to kill any containers using this script
 autoscaling_enabled="false"
 
@@ -46,7 +44,6 @@ echo "epoch_size: $epoch_size"
 echo "styx_threads_per_worker: $styx_threads_per_worker"
 echo "enable_compression: $enable_compression"
 echo "use_composite_keys: $use_composite_keys"
-echo "use_fallback_cache: $use_fallback_cache"
 echo "regenerate_tpcc_data: $regenerate_tpcc_data"
 echo "deploy_mode: $DEPLOY_MODE"
 echo "autoscaling_enabled: $autoscaling_enabled"
@@ -91,8 +88,28 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
 
 else
     # docker-compose mode
-    bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "$autoscaling_enabled"
-    sleep 10
+    bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$autoscaling_enabled"
+
+    # Wait for at least one worker to register with the coordinator
+    echo "Waiting for workers to register with coordinator..."
+    max_wait=120
+    waited=0
+    while true; do
+        worker_count=$(curl -s http://localhost:8000/metrics 2>/dev/null | grep -E '^live_worker_count ' | awk '{print $2}' | cut -d. -f1 || true)
+        if [[ -n "$worker_count" && "$worker_count" -ge 1 ]]; then
+            echo "Workers ready: $worker_count worker(s) registered"
+            break
+        fi
+        if [[ "$waited" -ge "$max_wait" ]]; then
+            echo "ERROR: Timed out waiting for workers after ${max_wait}s"
+            exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+        if (( waited % 5 == 0 )); then
+            echo "  Still waiting for workers... (${waited}s / ${max_wait}s)"
+        fi
+    done
 fi
 
 if [[ $workload_name == "ycsbt" ]]; then
@@ -134,7 +151,7 @@ elif [[ $workload_name == "tpcc" ]]; then
     python demo/demo-tpc-c/pure_kafka_demo.py \
         "$saving_dir" "$client_threads" "$n_part" \
         "$input_rate" "$total_time" "$warmup_seconds" \
-        "$n_keys" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "$epoch_size" "$load_config_path" "$autoscaling_enabled" "$kill_at"
+        "$n_keys" "$enable_compression" "$use_composite_keys" "$epoch_size" "$load_config_path" "$autoscaling_enabled" "$kill_at"
 else
     echo "Benchmark not supported!"
 fi
@@ -146,7 +163,7 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
         sudo kill "$KUBEFWD_PID" 2>/dev/null || true
         unset KUBEFWD_PID
     fi
-    bash scripts/uninstall_styx_cluster_with_helm.sh
+    #bash scripts/uninstall_styx_cluster_with_helm.sh
 else
     #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
     docker compose stop coordinator worker 

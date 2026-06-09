@@ -34,20 +34,21 @@ import kafka_output_consumer
 import pandas as pd
 import rand
 from setuptools._distutils.util import strtobool
-from styx.client import SyncStyxClient
+from styx.client.sync_client import SyncStyxClient
 from styx.common.local_state_backends import LocalStateBackend
 from styx.common.stateflow_graph import StateflowGraph
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from export_metadata import MetadataParams, save_metadata, get_migration_times
+from export_metadata import MetadataParams, save_metadata, export_metrics
+from migration_tracker import MigrationTracker
 from load_generator import LoadSchedule
 
 random.seed(42)
 
 threads = int(sys.argv[2])
+barrier = multiprocessing.Barrier(threads)
 N_PARTITIONS = int(sys.argv[3])
 messages_per_second = int(sys.argv[4])
-sleeps_per_second = 100
 sleep_time = 0.0085
 seconds = int(sys.argv[5])
 STYX_HOST: str = os.getenv("STYX_HOST", "localhost")
@@ -55,8 +56,8 @@ STYX_PORT: int = int(os.getenv("STYX_PORT", "8886"))
 KAFKA_URL: str = os.getenv("KAFKA_URL", "localhost:9092")
 warmup_seconds = int(sys.argv[6])
 N_W = int(sys.argv[7])
-epoch_size = int(sys.argv[11])
-load_config_path: str = sys.argv[12]
+epoch_size = int(sys.argv[10])
+load_config_path: str = sys.argv[11]
 current_time = datetime.now().strftime("%m%d_%H%M")
 SAVE_DIR: str = f"{sys.argv[1]}/tpcc_{messages_per_second}tps_{N_PARTITIONS}part_{current_time}"
 if not os.path.exists(SAVE_DIR):
@@ -76,12 +77,10 @@ MIN_PAYMENT = 1.0
 MAX_PAYMENT = 5000.0
 enable_compression: bool = bool(strtobool(sys.argv[8]))
 use_composite_keys: bool = bool(strtobool(sys.argv[9]))
-use_fallback_cache: bool = bool(strtobool(sys.argv[10]))
 os.environ["ENABLE_COMPRESSION"] = str(enable_compression)
 os.environ["USE_COMPOSITE_KEYS"] = str(use_composite_keys)
-os.environ["USE_FALLBACK_CACHE"] = str(use_fallback_cache)
-autoscaling_enabled: bool = sys.argv[13].lower() == "true"
-kill_at = int(sys.argv[14]) if len(sys.argv) > 14 else -1
+autoscaling_enabled: bool = sys.argv[12].lower() == "true"
+kill_at = int(sys.argv[13]) if len(sys.argv) > 14 else -1
 
 
 customers_per_district: dict[tuple, list] = {}
@@ -424,12 +423,14 @@ def tpc_c_workload_generator(proc_num):
 
 def benchmark_runner(proc_num) -> dict[bytes, dict]:
     print(f'Generator: {proc_num} starting with: EC={os.environ["ENABLE_COMPRESSION"]} '
-          f'CK={os.environ["USE_COMPOSITE_KEYS"]} FC={os.environ["USE_FALLBACK_CACHE"]}')
+          f'CK={os.environ["USE_COMPOSITE_KEYS"]}')
     styx = SyncStyxClient(STYX_HOST, STYX_PORT, kafka_url=KAFKA_URL)
+    time.sleep(proc_num * 0.2)
     styx.open(consume=False)
     tpc_c_generator = tpc_c_workload_generator(proc_num)
     timestamp_futures: dict[bytes, dict] = {}
     time.sleep(5)
+    barrier.wait()
     start = timer()
     for second in range(seconds):
         if proc_num == 0 and 0 <= kill_at == second:
@@ -437,8 +438,10 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
             print("KILL -> styx-worker-1 done")
         sec_start = timer()
         current_tps = load_schedule.get_tps(second)
+        sleeps_per_second = 100 if current_tps > 100 else 1
+        step = max(1, current_tps // sleeps_per_second)
         for i in range(current_tps):
-            if i % (current_tps // sleeps_per_second) == 0:
+            if i % step == 0:
                 time.sleep(sleep_time)
             operator, key, func_name, params = next(tpc_c_generator)
             future = styx.send_event(operator=operator,
@@ -452,7 +455,7 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
         if lps < 1:
             time.sleep(1 - lps)
         sec_end2 = timer()
-        print(f"{second} | TPS: {current_tps} | Latency: {sec_end2 - sec_start:.3f}s")
+        print(f" {datetime.now()} | {second} | TPS: {current_tps} | Latency: {sec_end2 - sec_start:.3f}s")
     end = timer()
     print(f"Average latency per second: {(end - start) / seconds}")
     styx.close()
@@ -488,7 +491,11 @@ def main():
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('fork')
+    multiprocessing.set_start_method('fork', force=True)
+    if autoscaling_enabled:
+        tracker = MigrationTracker("http://localhost:8000/metrics")
+        tracker.start()
+
     start_time = time.time()
     main()
     end_time = time.time()
@@ -505,19 +512,28 @@ if __name__ == "__main__":
         N_W,
         enable_compression,
         use_composite_keys,
-        use_fallback_cache
     )
+
     if autoscaling_enabled:
-        migration_start_time, migration_end_time = get_migration_times("http://localhost:8000/metrics")
+        migrations = tracker.stop()
+        print(f"Migrations: {migrations}")
     else:
-        migration_start_time = None
-        migration_end_time = None
-    
+        migrations = None
+
+    export_metrics(
+        save_dir=SAVE_DIR,
+        start_time=start_time,
+        end_time=end_time,
+        prometheus_url="http://localhost:9090",
+        step="1s",
+    )
+
     save_metadata(
         MetadataParams(
             workload="tpcc",
             start=start_time,
             end=end_time,
+            migrations=migrations,
             out_path=SAVE_DIR,
             n_partitions=N_PARTITIONS,
             messages_per_second=messages_per_second * threads,
@@ -525,7 +541,5 @@ if __name__ == "__main__":
             seconds=seconds,
             epoch_size=epoch_size,
             warmup_seconds=warmup_seconds,
-            migration_start_time=migration_start_time,
-            migration_end_time=migration_end_time,
         )
     )

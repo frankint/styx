@@ -13,6 +13,7 @@ class WorkerCapacityModel:
         self.epoch_max_size = epoch_max_size
         self.min_batch_threshold = min_batch_threshold
         self.base_alpha = base_alpha
+        self.min_weight_threshold = 0.5
 
         self._per_txn_cost_ewma: float | None = None
         self._max_observed_batch: int = 0
@@ -39,6 +40,9 @@ class WorkerCapacityModel:
         if self._per_txn_cost_ewma is None:
             self._per_txn_cost_ewma = per_txn_cost
         else:
+            # Only allow cost to increase (capacity decrease) with high-confidence observations
+            if per_txn_cost > self._per_txn_cost_ewma and weight < self.min_weight_threshold:
+                return
             self._per_txn_cost_ewma += effective_alpha * (per_txn_cost - self._per_txn_cost_ewma)
 
     def estimate_max_tps(self) -> float | None:
@@ -48,7 +52,7 @@ class WorkerCapacityModel:
         """
         if self._per_txn_cost_ewma is None or self._per_txn_cost_ewma <= 0:
             return None
-        return 1000.0 / self._per_txn_cost_ewma
+        return 1000.0 / self._per_txn_cost_ewma  # ms to second conversion
 
     @property
     def confidence(self) -> float:
@@ -84,7 +88,7 @@ class SystemCapacityEstimator:
         if worker_id not in self._models:
             self._models[worker_id] = WorkerCapacityModel(
                 self.sequence_max_size,
-                self.min_batch_threshold,
+                self.sequence_max_size // 10,
                 self.base_alpha,
             )
         return self._models[worker_id]

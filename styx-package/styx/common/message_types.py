@@ -27,7 +27,6 @@ class MessageType(IntEnum):
     SyncCleanup = 22
     RemoteWantsToProceed = 23
     ChainAbort = 24
-    AckCache = 25
     WrongPartitionRequest = 26
     InitMigration = 27
     MigrationRepartitioningDone = 28
@@ -44,3 +43,5 @@ class MessageType(IntEnum):
     MigrationInitDone = 39
     InitDataComplete = 40
     UpdateExecutionGraph = 41
+    RunFunRemoteBatch = 42
+    AckBatch = 43

@@ -12,6 +12,7 @@ class BacklogPIDController:
 
     integral_max: float = 100.0
     scale_up_threshold: float = 1.0
+    backlog_threshold: float = 10.0
 
     # Internal state
     integral: float = 0.0
@@ -19,14 +20,12 @@ class BacklogPIDController:
     smoothed_derivative: float = 0.0
 
     def compute(self, total_backlog: float, smoothed_tps: float) -> float:
-        if smoothed_tps <= 0 or total_backlog <= 0:
+        if smoothed_tps <= 0 or total_backlog <= self.backlog_threshold:
             return 0.0
 
-        normalized_backlog = total_backlog / smoothed_tps
-        error = normalized_backlog  # no clamping, no target offset
+        error = total_backlog / smoothed_tps
 
         logging.warning(f"CONTROLLER | Total backlog: {total_backlog}; tps: {smoothed_tps}")
-        logging.warning(f"CONTROLLER | Error (normalized backlog): {error} and prev error: {self.prev_error}")
         if self.prev_error is None:
             self.prev_error = error
         # P: how bad is it right now?

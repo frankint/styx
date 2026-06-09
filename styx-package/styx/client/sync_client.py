@@ -70,10 +70,10 @@ class SyncStyxClient(BaseStyxClient):
         self.kafka_producer_config = {
             "bootstrap.servers": self._kafka_url,
             "acks": "all",
-            "linger.ms": 0,
+            "linger.ms": 5,
             "compression.type": "none",
             "enable.idempotence": True,
-            "max.in.flight.requests.per.connection": 1,
+            "max.in.flight.requests.per.connection": 3,
             "client.id": str(uuid.uuid4()),
             "metadata.max.age.ms": 5000,  # Refresh metadata every 5s for scale-up support
         }

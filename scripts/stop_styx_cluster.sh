@@ -5,17 +5,18 @@ threads_per_worker=$1
 TS=$(date +"%Y%m%d-%H%M%S")
 
 export STYX_WORKER_THREADS="$threads_per_worker"
-mkdir -p logs
+dir_location="logs"
+mkdir -p "$dir_location"
 
 # One file per scaled worker replica (compose logs worker merges all replicas).
 for cid in $(docker compose ps -a -q worker 2>/dev/null); do
   cname=$(docker inspect --format '{{.Name}}' "$cid" | sed 's|^/||')
-  docker logs "$cid" 2>&1 | grep -v '|[[:space:]]*$' > "logs/${cname}-logs-${TS}.log"
+  docker logs "$cid" 2>&1 | grep -v '|[[:space:]]*$' > "${dir_location}/${cname}-logs-${TS}.log"
 done
-docker compose logs coordinator > "logs/coordinator-logs-${TS}.log"
+docker compose logs coordinator > "${dir_location}/coordinator-logs-${TS}.log"
 for cid in $(docker compose ps -a -q worker-standby 2>/dev/null); do
   cname=$(docker inspect --format '{{.Name}}' "$cid" | sed 's|^/||')
-  docker logs "$cid" 2>&1 | grep -v '|[[:space:]]*$' > "logs/${cname}-logs-${TS}.log"
+  docker logs "$cid" 2>&1 | grep -v '|[[:space:]]*$' > "${dir_location}/${cname}-logs-${TS}.log"
 done
 
 # DELETE PREVIOUS DEPLOYMENT

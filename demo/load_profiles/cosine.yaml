@@ -1,5 +1,5 @@
 profile: cosine
 step_size: 5
 cosine_period: 30
-max_divergence: 5500
-max_noise: 50
+max_divergence: 7000
+max_noise: 500

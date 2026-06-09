@@ -40,7 +40,6 @@ class _ClusterParams:
     threads_per_worker: int = 1
     enable_compression: str = "true"
     use_composite_keys: str = "true"
-    use_fallback_cache: str = "true"
 
 
 @dataclass(frozen=True)
@@ -97,7 +96,6 @@ def _start_cmd(paths: _Paths, p: _ClusterParams) -> list[str]:
         str(p.threads_per_worker),
         p.enable_compression,
         p.use_composite_keys,
-        p.use_fallback_cache,
     ]
 
 
@@ -116,9 +114,8 @@ def _client_cmd(results_dir: Path, cluster: _ClusterParams, client: _ClientParam
     #  7  N_W
     #  8  enable_compression
     #  9  use_composite_keys
-    # 10  use_fallback_cache
-    # 11  load_config_path
-    # 12  kill_at (optional; default -1)
+    # 10  load_config_path
+    # 11  kill_at (optional; default -1)
     return [
         "python",
         "pure_kafka_demo.py",
@@ -131,7 +128,6 @@ def _client_cmd(results_dir: Path, cluster: _ClusterParams, client: _ClientParam
         str(client.n_warehouses),
         cluster.enable_compression,
         cluster.use_composite_keys,
-        cluster.use_fallback_cache,
         "../load_profiles/constant.yaml",
         str(client.kill_at),
     ]

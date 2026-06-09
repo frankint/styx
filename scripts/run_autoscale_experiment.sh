@@ -4,7 +4,6 @@ set -eo pipefail
 styx_threads_per_worker=1
 enable_compression=true
 use_composite_keys=true
-use_fallback_cache=true
 regenerate_tpcc_data=false
 
 workload_name=$1
@@ -22,8 +21,7 @@ num_standby_workers=${12:-$n_part}
 [ -n "${13}" ] && styx_threads_per_worker=${13}
 [ -n "${14}" ] && enable_compression=${14}
 [ -n "${15}" ] && use_composite_keys=${15}
-[ -n "${16}" ] && use_fallback_cache=${16}
-[ -n "${17}" ] && regenerate_tpcc_data=${17}
+[ -n "${16}" ] && regenerate_tpcc_data=${16}
 kill_at="-1" 
 autoscaling_enabled="true"
 
@@ -48,7 +46,6 @@ echo "num_standby_workers: $num_standby_workers"
 echo "styx_threads_per_worker: $styx_threads_per_worker"
 echo "enable_compression: $enable_compression"
 echo "use_composite_keys: $use_composite_keys"
-echo "use_fallback_cache: $use_fallback_cache"
 echo "regenerate_tpcc_data: $regenerate_tpcc_data"
 echo "autoscaling_enabled: $autoscaling_enabled"
 echo "workload_profile: $workload_profile"
@@ -92,8 +89,7 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
 
 else
     # docker-compose mode
-    export INITIAL_WORKERS=1
-bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "$autoscaling_enabled"
+    bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$autoscaling_enabled"
     docker compose --profile autoscale up --scale worker-standby="$num_standby_workers" -d worker-standby >/dev/null
 
     # Wait for at least one worker to register with the coordinator
@@ -158,7 +154,7 @@ elif [[ $workload_name == "tpcc" ]]; then
     python demo/demo-tpc-c/pure_kafka_demo.py \
         "$saving_dir" "$client_threads" "$n_part" \
         "$input_rate" "$total_time" "$warmup_seconds" \
-        "$n_keys" "$enable_compression" "$use_composite_keys" "$use_fallback_cache" "$epoch_size" "$load_config_path" "$autoscaling_enabled" "$kill_at"
+        "$n_keys" "$enable_compression" "$use_composite_keys" "$epoch_size" "$load_config_path" "$autoscaling_enabled" "$kill_at"
 else
     echo "Benchmark not supported!"
 fi
@@ -170,7 +166,7 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
         sudo kill "$KUBEFWD_PID" 2>/dev/null || true
         unset KUBEFWD_PID
     fi
-    bash scripts/uninstall_styx_cluster_with_helm.sh
+    #bash scripts/uninstall_styx_cluster_with_helm.sh
 else
     #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
     docker compose stop coordinator worker worker-standby

@@ -105,9 +105,8 @@ class Operator(BaseOperator):
         request_id: bytes,
         function_name: str,
         partition: int,
-        ack_payload: tuple[str, int, int, str, list[int], int] | None,
+        ack_payload: tuple[str, int, int, str, list[int]] | None,
         fallback_mode: bool,
-        use_fallback_cache: bool,
         params: tuple,
         protocol: BaseTransactionalProtocol,
     ) -> bool:
@@ -121,7 +120,6 @@ class Operator(BaseOperator):
             partition (int): Partition on which to execute the function.
             ack_payload (tuple | None): Metadata for acknowledgement in distributed chains.
             fallback_mode (bool): Whether to execute in fallback (recovery) mode.
-            use_fallback_cache (bool): Whether to use cached fallback results.
             params (tuple): Parameters to pass to the function.
             protocol (BaseTransactionalProtocol): Protocol for managing distributed transactional execution..
 
@@ -135,7 +133,6 @@ class Operator(BaseOperator):
             t_id,
             request_id,
             fallback_mode,
-            use_fallback_cache,
             protocol,
         )
         params = (f, *tuple(params))
@@ -149,40 +146,35 @@ class Operator(BaseOperator):
                 ack_id,
                 fraction_str,
                 chain_participants,
-                partial_node_count,
             ) = ack_payload
-            resp, n_remote_calls, partial_node_count = await f(
+            resp, n_remote_calls = await f(
                 *params,
                 ack_host=ack_host,
                 ack_port=ack_port,
                 ack_share=fraction_str,
                 chain_participants=chain_participants,
-                partial_node_count=partial_node_count,
             )
             if isinstance(resp, Exception):
                 await self._send_chain_abort(str(resp), ack_host, ack_port, ack_id)
                 success = False
                 tb_str = "".join(traceback.format_exception(type(resp), resp, resp.__traceback__))
                 logging.error(f"Transaction {t_id} failed with exception:\n{tb_str}")
-            elif fallback_mode and use_fallback_cache:
-                await self.__send_cache_ack(ack_host, ack_port, ack_id)
             elif n_remote_calls == 0:
-                # we need to count the last node as part of the chain
-                partial_node_count += 1
-                await self.__send_ack(
+                # Non-awaiting: buffers the ack; flush happens automatically
+                # at the next event-loop tick (`NetworkingManager.enqueue_ack`).
+                self.__send_ack(
                     ack_host,
                     ack_port,
                     ack_id,
                     fraction_str,
                     chain_participants,
-                    partial_node_count,
                 )
             if success and resp is not None:
                 # send the response to the root
                 await self._send_response_to_root(resp, ack_host, ack_port, ack_id)
         else:
             # root of a chain, or single call
-            resp, _, _ = await f(*params)
+            resp, _ = await f(*params)
             if isinstance(resp, Exception):
                 self.__networking.abort_chain(t_id, str(resp))
                 success = False
@@ -242,63 +234,42 @@ class Operator(BaseOperator):
                 serializer=Serializer.MSGPACK,
             )
 
-    async def __send_cache_ack(self, ack_host: str, ack_port: int, ack_id: int) -> None:
-        """Sends an acknowledgement to the worker that holds the root of a distributed chain during fallback mode
-         with cache enabled.
-
-        Args:
-            ack_host: Hostname or IP of the next worker.
-            ack_port: Port number of the next worker.
-            ack_id: Acknowledgement ID for the cache.
-        """
-        if self.__networking.in_the_same_network(ack_host, ack_port):
-            # case when the ack host is the same worker
-            self.__networking.add_ack_cnt(ack_id)
-        else:
-            await self.__networking.send_message(
-                ack_host,
-                ack_port,
-                msg=(ack_id,),
-                msg_type=MessageType.AckCache,
-                serializer=Serializer.MSGPACK,
-            )
-
-    async def __send_ack(
+    def __send_ack(
         self,
         ack_host: str,
         ack_port: int,
         ack_id: int,
         fraction_str: str,
         chain_participants: list[int],
-        partial_node_count: int,
     ) -> None:
-        """Sends an acknowledgement to the worker that holds the root of a distributed chain during normal operation.
+        """Records an acknowledgement for the root of a distributed chain.
+
+        Same-network: updates the local fraction map directly. Cross-network:
+        buffers the ack for the next event-loop tick; the networking layer
+        coalesces all acks for the same peer into a single `AckBatch` send.
 
         Args:
-            ack_host: Hostname or IP of the next worker.
-            ack_port: Port number of the next worker.
+            ack_host: Hostname or IP of the chain root's worker.
+            ack_port: Port number of the chain root's worker.
             ack_id: Acknowledgement ID for the chain.
             fraction_str: Fraction of chain progress.
             chain_participants: List of worker IDs that participated in the chain.
-            partial_node_count: Count of nodes contributing to the result.
         """
         if self.__networking.in_the_same_network(ack_host, ack_port):
-            # case when the ack host is the same worker
             self.__networking.add_ack_fraction_str(
                 ack_id,
                 fraction_str,
                 chain_participants,
-                partial_node_count,
             )
         else:
             if self.__networking.worker_id not in chain_participants:
                 chain_participants.append(self.__networking.worker_id)
-            await self.__networking.send_message(
+            self.__networking.enqueue_ack(
                 ack_host,
                 ack_port,
-                msg=(ack_id, fraction_str, chain_participants, partial_node_count),
-                msg_type=MessageType.Ack,
-                serializer=Serializer.MSGPACK,
+                ack_id,
+                fraction_str,
+                chain_participants,
             )
 
     def __materialize_function(
@@ -309,7 +280,6 @@ class Operator(BaseOperator):
         t_id: int,
         request_id: bytes,
         fallback_mode: bool,
-        use_fallback_cache: bool,
         protocol: BaseTransactionalProtocol,
     ) -> StatefulFunction:
         """Constructs and binds a `StatefulFunction` instance.
@@ -321,7 +291,6 @@ class Operator(BaseOperator):
             t_id: Transaction ID.
             request_id: Unique request identifier.
             fallback_mode: Whether to use fallback logic.
-            use_fallback_cache: Whether to use the fallback cache.
             protocol: Coordination protocol to use.
 
         Returns:
@@ -341,7 +310,6 @@ class Operator(BaseOperator):
             t_id,
             request_id,
             fallback_mode,
-            use_fallback_cache,
             self.__deployed_graph,
             self.__run_func_lock,
             protocol,

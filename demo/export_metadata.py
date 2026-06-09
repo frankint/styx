@@ -3,19 +3,12 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
-from decimal import Decimal
 
 import requests
-import re
+import pandas as pd
+from pathlib import Path
 
 PROM = "http://localhost:9090"
-
-
-def save_data(data, save_dir, filename):
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    with open(os.path.join(save_dir, filename), "w") as f:
-        json.dump(data, f, indent=2)
 
 
 @dataclass(frozen=True)
@@ -30,22 +23,85 @@ class MetadataParams:
     seconds: int
     epoch_size: int
     warmup_seconds: int
-    migration_start_time: Optional[float] = None
-    migration_end_time: Optional[float] = None
+    migrations: list[dict] = None
     zipf_const: Optional[float] = None
     interval_seconds: Optional[int] = None
     delta_tps: Optional[int] = None
     n_threads: int = 1
 
-def get_migration_times(url: str) -> tuple[float, float]:
-    resp = requests.get(f"{url}")
 
-    match = re.search(r'^migration_end_time_ms.*$', resp.text, re.MULTILINE)
-    migration_end_time = match.group(0).split(" ")[1] if match else None
-    match = re.search(r'^migration_start_time_ms.*$', resp.text, re.MULTILINE)
-    migration_start_time = match.group(0).split(" ")[1] if match else None
-    #print(f"Returning migration times: {migration_start_time}, {migration_end_time}")
-    return float(Decimal(migration_start_time)), float(Decimal(migration_end_time)) # handle scientific notations safely
+def query_prometheus_range(
+    metric: str,
+    start_time: float,  # Unix timestamp (seconds)
+    end_time: float,
+    step: str = "1s",
+    prometheus_url: str = "http://localhost:9090",
+) -> pd.DataFrame:
+    """Query Prometheus for a time series over a range."""
+    resp = requests.get(
+        f"{prometheus_url}/api/v1/query_range",
+        params={
+            "query": metric,
+            "start": start_time,
+            "end": end_time,
+            "step": step,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    
+    if data["status"] != "success":
+        raise ValueError(f"Prometheus query failed: {data}")
+    
+    results = data["data"]["result"]
+    if not results:
+        return pd.DataFrame(columns=["timestamp", "value"])
+    
+    # Handle multiple series (e.g., per-instance metrics)
+    rows = []
+    for series in results:
+        labels = series.get("metric", {})
+        for timestamp, value in series["values"]:
+            row = {"timestamp": float(timestamp), "value": float(value)}
+            row.update(labels)  # Add labels as columns
+            rows.append(row)
+    
+    return pd.DataFrame(rows)
+
+def export_metrics(
+    save_dir: Path,
+    start_time: float,
+    end_time: float,
+    prometheus_url: str = "http://localhost:9090",
+    step: str = "1s",
+):
+    """Export key metrics from Prometheus to CSV files."""
+    metrics = {
+        "backlog": "sum(queue_backlog)",
+        "num_workers": "live_worker_count",
+    }
+    
+    save_dir = Path(save_dir)
+    
+    for name, query in metrics.items():
+        try:
+            df = query_prometheus_range(
+                query, start_time, end_time, step, prometheus_url
+            )
+            if not df.empty:
+                df.to_csv(save_dir / f"{name}.csv", index=False)
+                print(f"Exported {name}: {len(df)} data points")
+        except Exception as e:
+            print(f"Failed to export {name}: {e}")
+
+
+def save_data(data, save_dir, filename):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    with open(os.path.join(save_dir, filename), "w") as f:
+        json.dump(data, f, indent=2)
+
 
 def save_metadata(params: MetadataParams):
     metadata = {
@@ -58,8 +114,7 @@ def save_metadata(params: MetadataParams):
         "duration (s)": params.seconds, 
         "epoch_size": params.epoch_size,
         "warmup_seconds": params.warmup_seconds,
-        "migration_start_time": params.migration_start_time if params.migration_start_time is not None else None,
-        "migration_end_time": params.migration_end_time if params.migration_end_time is not None else None,
+        "migrations": params.migrations if params.migrations is not None else None,
     }
     if params.zipf_const is not None:
         metadata["zipf_const"] = params.zipf_const

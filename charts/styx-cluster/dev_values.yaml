@@ -30,11 +30,15 @@ styx:
       repository: styx-worker
       tag: dev
       pullPolicy: IfNotPresent
-    replicas: 2
+    replicas: 1
     env:
       INGRESS_TYPE: KAFKA
       WORKER_THREADS: "2"
-    resources: {}
+    resources:
+      requests:
+        cpu: "500m"
+      limits:
+        cpu: "1"
     service:
       type: ClusterIP
       port: 8000

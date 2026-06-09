@@ -63,7 +63,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 1,
+  "id": 2,
   "links": [
     {
       "asDropdown": false,
@@ -933,6 +933,7 @@
         {
           "editorMode": "code",
           "expr": "sum(rate(input_rate_counter_total[15s]))",
+          "interval": "1",
           "legendFormat": "Total Worker Consumption Rate",
           "range": true,
           "refId": "A"
@@ -1048,6 +1049,7 @@
         {
           "editorMode": "code",
           "expr": "sum(rate(epoch_total_transactions_total[15s]))",
+          "interval": "1",
           "range": true,
           "refId": "A"
         }
@@ -1800,7 +1802,7 @@
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
-      "description": "TPS per operator -> calculated as operator execution time in the epoch / total epoch latency",
+      "description": "Input Rate vs Output Rate",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1884,15 +1886,30 @@
             "uid": "PBFA97CFB590B2093"
           },
           "editorMode": "code",
-          "expr": "avg by (operator) (rate(operator_tps_total[5s]))",
+          "expr": "sum(rate(input_rate_counter_total[15s]))",
           "hide": false,
           "instant": false,
-          "legendFormat": "__auto",
+          "interval": "1",
+          "legendFormat": "Input Rate",
           "range": true,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(epoch_total_transactions_total[15s]))",
+          "hide": false,
+          "instant": false,
+          "interval": "1",
+          "legendFormat": "Output Rate",
+          "range": true,
+          "refId": "A"
         }
       ],
-      "title": "Operator TPS",
+      "title": "Throughput Comparison",
       "type": "timeseries"
     },
     {
@@ -2399,7 +2416,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "orange",
@@ -2483,6 +2501,6 @@
   "timezone": "browser",
   "title": "Styx System Overview",
   "uid": "beckc0nxpeupsf",
-  "version": 17,
+  "version": 1,
   "weekStart": ""
 }

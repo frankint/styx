@@ -43,7 +43,6 @@ EXPOSE 8888
 ARG epoch_size=100
 ARG enable_compression=true
 ARG use_composite_keys=true
-ARG use_fallback_cache=true
 
 ENV SEQUENCE_MAX_SIZE=$epoch_size \
     ENABLE_COMPRESSION=$enable_compression \

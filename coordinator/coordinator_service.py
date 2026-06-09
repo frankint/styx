@@ -22,6 +22,7 @@ from coordinator_metadata import Coordinator
 from prometheus_client import Counter, Gauge, start_http_server
 from setuptools._distutils.util import strtobool
 from sliding_window_metric import SlidingWindowMetric
+from styx.common.base_networking import SOCKET_RCV_BUF, SOCKET_SND_BUF
 from styx.common.logging import logging
 from styx.common.message_types import MessageType
 from styx.common.metrics import WorkerEpochStats
@@ -124,8 +125,29 @@ class CoordinatorService:
         self.puller_task: asyncio.Task | None = None
 
     def _init_listen_sockets(self) -> None:
-        self.coor_socket = self._bind_listen_tcp_socket(SERVER_PORT)
-        self.protocol_socket = self._bind_listen_tcp_socket(SERVER_PORT + 1)
+        self.coor_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.coor_socket.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_LINGER,
+            struct.pack("ii", 1, 0),
+        )  # Enable LINGER, timeout 0
+        self.coor_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.coor_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_SND_BUF)
+        self.coor_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_RCV_BUF)
+        self.coor_socket.bind(("0.0.0.0", SERVER_PORT))  # noqa: S104
+        self.coor_socket.setblocking(False)
+
+        self.protocol_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.protocol_socket.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_LINGER,
+            struct.pack("ii", 1, 0),
+        )  # Enable LINGER, timeout 0
+        self.protocol_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.protocol_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_SND_BUF)
+        self.protocol_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_RCV_BUF)
+        self.protocol_socket.bind(("0.0.0.0", SERVER_PORT + 1))  # noqa: S104
+        self.protocol_socket.setblocking(False)
 
     def _init_recovery_fields(self) -> None:
         self.aria_metadata: AriaSyncMetadata | None = None
@@ -283,19 +305,22 @@ class CoordinatorService:
 
     def _init_scaling_capacity_and_chronos(self) -> None:
         self.enable_autoscale: bool = bool(strtobool(os.getenv("ENABLE_AUTOSCALE", "true")))
-        self.scale_up_cpu_threshold: float = 70.0
-        self.scale_cooldown_period: float = 15.0
+        self.scale_cooldown_period: float = 30.0
         self.capacity_confidence_threshold: float = 0.25
-        self.downscale_safety_factor: float = 0.95
+        self.downscale_safety_factor: float = 0.90
         self._pending_downscale: bool = False
         self._downscale_victim_ids: set[int] = set()
-        # Autoscale cooldown: `scale_cooldown_period` seconds after migration fully
-        # completes (MigrationDone barrier), not from scale_up/scale_down start — so long
-        # migrations still get a full quiet window once the cluster is stable.
-        self.last_scale_action_time: float = 0.0
-        self.scale_window_seconds: int = 5
-        self.cpu_metric_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
-        self.migration_time_window: SlidingWindowMetric = SlidingWindowMetric(5)
+
+        self.last_scale_action_time: float = time.time()
+        self.scale_window_seconds: int = 10
+        self.migration_time_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
+        self.epoch_duration_window = SlidingWindowMetric(self.scale_window_seconds)
+        self.tps_sliding_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
+
+        self._last_action_was_downscale: bool = False
+        self._downscale_suppressed_until: float = 0.0
+        self._downscale_penalty_base: float = self.scale_cooldown_period * 2
+        self._downscale_penalty_max: float = self.scale_cooldown_period * 30
 
         self.pid_controller = BacklogPIDController()
         # Per-epoch accumulators: populated as each worker reports, consumed when all have synced
@@ -304,9 +329,6 @@ class CoordinatorService:
         self.total_tps_accum: dict[int, float] = {}
         self.num_keys_accum: dict[int, int] = {}
 
-        self.epoch_duration_window = SlidingWindowMetric(5)
-        self.tps_window_seconds: int = 10
-        self.tps_sliding_window: SlidingWindowMetric = SlidingWindowMetric(self.tps_window_seconds)
         self.system_capacity_estimator: SystemCapacityEstimator = SystemCapacityEstimator(
             sequence_max_size=SEQUENCE_MAX_SIZE,
         )
@@ -350,15 +372,6 @@ class CoordinatorService:
 
         if new_n_partitions <= 0:
             logging.warning(f"Scale Up requested with invalid new_n_partitions={new_n_partitions}")
-            return
-
-        # TODO: Decide how to handle this
-        max_parallelism = 10  # int(os.getenv("MAX_OPERATOR_PARALLELISM", 10))
-        if new_n_partitions > max_parallelism:
-            logging.warning(
-                f"Scale Up requested with new_n_partitions={new_n_partitions} "
-                f"but MAX_OPERATOR_PARALLELISM={max_parallelism}"
-            )
             return
 
         # 1) Build an updated graph (same topology, updated partition count)
@@ -412,6 +425,26 @@ class CoordinatorService:
         self.migration_start_time = start_time
         self.migration_start_count.inc()
         self.live_worker_count_gauge.set(len(self.coordinator.worker_pool.get_live_workers()))
+        self._note_scale_action(is_downscale=False)
+
+    def _note_scale_action(self, is_downscale: bool) -> None:
+        now = time.time()
+        if not is_downscale and self._last_action_was_downscale:
+            # scale-up is the first action after a scale-down => the down was wrong
+            self._downscale_strikes += 1
+            penalty = min(
+                self._downscale_penalty_base * (2 ** (self._downscale_strikes - 1)),
+                self._downscale_penalty_max,
+            )
+            self._downscale_suppressed_until = now + penalty
+            logging.warning(
+                f"DOWNSCALE | correction detected (strike #{self._downscale_strikes}); "
+                f"suppressing downscale for {penalty:.0f}s"
+            )
+        elif is_downscale and now > self._downscale_suppressed_until:
+            # long stretch with no correction -> forgive past strikes
+            self._downscale_strikes = 0
+        self._last_action_was_downscale = is_downscale
 
     async def scale_down(self, workers_to_remove: int) -> None:
         """Scale down by removing *workers_to_remove* workers without changing
@@ -434,9 +467,12 @@ class CoordinatorService:
             )
             return
 
-        # 1) Pick victims (highest worker-ids for now)
-        sorted_workers = sorted(live_workers, key=lambda w: w.worker_id, reverse=True)
-        self._downscale_victim_ids: set[int] = {w.worker_id for w in sorted_workers[:workers_to_remove]}
+        # 1) Pick victims witg smallest backlog
+        sorted_workers = sorted(
+            live_workers,
+            key=lambda w: self.epoch_backlog_accum.get(w.worker_id, 0),
+        )
+        self._downscale_victim_ids = {w.worker_id for w in sorted_workers[:workers_to_remove]}
 
         # 2) Mark migration in progress and stop snapshotting.
         self.migration_in_progress = True
@@ -463,6 +499,7 @@ class CoordinatorService:
         self.migration_start_time = start_time
         self.migration_start_count.inc()
         self.live_worker_count_gauge.set(n_live)
+        self._note_scale_action(is_downscale=True)
 
     async def coordinator_controller(
         self,
@@ -696,9 +733,9 @@ class CoordinatorService:
             self.network_tx_gauge.labels(instance=worker_id).set(tx_net)  # KB
 
             heartbeat_rcv_time = timer()
-            logging.info(
-                f"Heartbeat received from: {worker_id} at time: {heartbeat_rcv_time}",
-            )
+            # logging.info(
+            #    f"Heartbeat received from: {worker_id} at time: {heartbeat_rcv_time}",
+            # )
 
             self.coordinator.register_worker_heartbeat(worker_id, heartbeat_rcv_time)
 
@@ -752,12 +789,12 @@ class CoordinatorService:
             if not sync_complete:
                 return
 
+            self.aria_metadata.reset(mt)
             await self.finalize_worker_sync(
                 mt,
                 (self.aria_metadata.logic_aborts_everywhere,),
                 Serializer.PICKLE,
             )
-            self.aria_metadata.cleanup()
 
     async def _handle_aria_commit(self, data: bytes) -> None:
         mt = MessageType.AriaCommit
@@ -773,17 +810,18 @@ class CoordinatorService:
             if not sync_complete:
                 return
 
+            commit_payload = (
+                self.aria_metadata.concurrency_aborts_everywhere,
+                self.aria_metadata.processed_seq_size,
+                self.aria_metadata.max_t_counter,
+                self.aria_metadata.take_snapshot,
+            )
+            self.aria_metadata.reset(mt)
             await self.finalize_worker_sync(
                 mt,
-                (
-                    self.aria_metadata.concurrency_aborts_everywhere,
-                    self.aria_metadata.processed_seq_size,
-                    self.aria_metadata.max_t_counter,
-                    self.aria_metadata.take_snapshot,
-                ),
+                commit_payload,
                 Serializer.PICKLE,
             )
-            self.aria_metadata.cleanup(take_snapshot=True)
 
     async def _handle_aria_fallback_sync(self, data: bytes) -> None:
         # Handles both AriaFallbackStart and AriaFallbackDone
@@ -791,16 +829,16 @@ class CoordinatorService:
         async with self.networking_locks[mt]:
             (worker_id,) = self.protocol_networking.decode_message(data)
 
-            sync_complete: bool = self.aria_metadata.set_empty_sync_done(worker_id)
+            sync_complete: bool = self.aria_metadata.set_empty_sync_done(mt, worker_id)
             if not sync_complete:
                 return
 
+            self.aria_metadata.reset(mt)
             await self.finalize_worker_sync(
                 mt,
                 b"",
                 Serializer.NONE,
             )
-            self.aria_metadata.cleanup()
 
     async def _handle_sync_cleanup(self, data: bytes) -> None:
         mt = MessageType.SyncCleanup
@@ -868,32 +906,33 @@ class CoordinatorService:
             self.total_tps_accum[worker_id] = worker_epoch_stats.epoch_throughput
             self.epoch_rate_accum[worker_id] = worker_epoch_stats.input_rate
             self.num_keys_accum[worker_id] = worker_epoch_stats.key_counts
-            self.epoch_duration_window.add(worker_epoch_stats.epoch_latency)
 
             self._record_epoch_metrics(
                 worker_epoch_stats,
             )
-
             self.system_capacity_estimator.record(
                 worker_id,
                 worker_epoch_stats.total_txns,
                 worker_epoch_stats.epoch_latency,
             )
 
-            # Feed the Chronos metric buffer
-            now = time.time()
-            self.metric_buffer.add("input_rate", worker_epoch_stats.input_rate, now)
+            # Record metric only when system is stabilized after migration
+            if not self.migration_in_progress:
+                now = time.time()
+                self.metric_buffer.add("input_rate", worker_epoch_stats.input_rate, now)
+                self.epoch_duration_window.add(worker_epoch_stats.epoch_latency)
 
-            sync_complete: bool = self.aria_metadata.set_empty_sync_done(worker_id)
+            sync_complete: bool = self.aria_metadata.set_empty_sync_done(mt, worker_id)
             if not sync_complete:
                 return
 
+            stop_next_epoch = self.aria_metadata.stop_next_epoch
+            self.aria_metadata.reset(mt)
             await self.finalize_worker_sync(
                 mt,
-                (self.aria_metadata.stop_next_epoch,),
+                (stop_next_epoch,),
                 Serializer.MSGPACK,
             )
-            self.aria_metadata.cleanup(epoch_end=True)
 
             # All workers have synced -- aggregate epoch-level metrics
             total_backlog = sum(self.epoch_backlog_accum.values())
@@ -913,8 +952,10 @@ class CoordinatorService:
                 if pid_output >= self.pid_controller.scale_up_threshold and not (
                     time.time() - self.last_scale_action_time < self.scale_cooldown_period
                 ):
-                    to_add = self._resolve_scale_up_workers(1)
+                    to_add = round(pid_output / self.pid_controller.scale_up_threshold)
+                    to_add = self._resolve_scale_up_workers(to_add)
                     if to_add == 0:
+                        self.last_scale_action_time = time.time()
                         logging.warning("PID | no standby workers available, skipping scale up")
                         return
                     new_partition_num = len(self.coordinator.worker_pool.get_participating_workers()) + to_add
@@ -933,6 +974,7 @@ class CoordinatorService:
         """
         n_standby = self.coordinator.worker_pool.pending_standby_worker_count()
         if n_standby == 0:
+            self.last_scale_action_time = time.time()
             logging.warning("SCALE UP | no standby workers available")
             return 0
         if to_add > n_standby:
@@ -940,7 +982,7 @@ class CoordinatorService:
             return n_standby
         return to_add
 
-    def _compute_predictive_scaling(self, predictions: dict[str, list[float]]) -> tuple[bool, int]:
+    def _compute_predictive_upscaling(self, predictions: dict[str, list[float]]) -> tuple[bool, int]:
         """Compare the Chronos forecast against the capacity model.
         Returns (should_scale, workers_to_add).
         """
@@ -952,7 +994,7 @@ class CoordinatorService:
 
         n_workers = len(self.coordinator.worker_pool.get_live_workers())
         raw_capacity = self.system_capacity_estimator.estimate_system_capacity()
-        if raw_capacity is None:
+        if raw_capacity is None or (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
             return False, 0
         if self._capacity_ewma is None:
             self._capacity_ewma = raw_capacity
@@ -972,8 +1014,11 @@ class CoordinatorService:
 
         headroom_factor = 1
         effective_capacity = system_capacity * headroom_factor
-        
-        if peak_predicted <= effective_capacity:
+        logging.warning(
+            f"PREDICTIVE | confidence={confidence:.2f} | peak_p75={peak_p75:.0f} | "
+            f"raw_capacity={raw_capacity:.0f} | effective={effective_capacity:.0f}"
+        )
+        if peak_p75 <= effective_capacity:
             return False, 0
 
         # Point forecast scaling policy: Only scale if predictions represent a significant spike (e.g. > 15% increase)
@@ -989,12 +1034,10 @@ class CoordinatorService:
             int(peak_predicted / (per_worker_capacity * headroom_factor)) + 1,
         )
         # Don't more than double the cluster in one step
-        to_add = 1 if n_needed > n_workers else 0
-        if to_add <= 0 or (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
-            return False, 0
+        to_add = min(n_needed - n_workers, n_workers)
         # scale_up only activates workers from _standby_queue; clamp and skip if none left
         to_add = self._resolve_scale_up_workers(to_add)
-        if to_add == 0:
+        if to_add <= 0:
             return False, 0
 
         logging.warning(f"PREDICTIVE | SCALE UP: need {n_needed} workers (currently {n_workers}, adding {to_add})")
@@ -1004,10 +1047,17 @@ class CoordinatorService:
         """Check if the system can serve predicted demand with fewer workers.
         Returns (should_downscale, workers_to_remove).
         """
+        if (
+            time.time() - self.last_scale_action_time < self.scale_cooldown_period
+            or self.migration_in_progress
+            or time.time() < self._downscale_suppressed_until
+        ):
+            return False, 0
         n_workers = len(self.coordinator.worker_pool.get_live_workers())
-        # Backlog must be zero before considering downscale
+        # Backlog must be essentially zero before considering downscale,
+        # use value a little above zero to account for timing jitter on the worker side
         total_backlog = sum(self.epoch_backlog_accum.values())
-        if n_workers <= 1 or total_backlog > 0 or self._capacity_ewma is None:
+        if n_workers <= 1 or total_backlog >= self.pid_controller.backlog_threshold or self._capacity_ewma is None:
             return False, 0
 
         per_worker_cap = self._capacity_ewma / n_workers
@@ -1039,7 +1089,7 @@ class CoordinatorService:
         process and poll for results.  Runs as a long-lived coroutine."""
         while True:
             await asyncio.sleep(FORECASTER_FORECAST_INTERVAL)
-            if self.chronos_forecaster is None or not self.chronos_forecaster.is_alive:
+            if self.chronos_forecaster is None or not self.chronos_forecaster.is_alive or self.migration_in_progress:
                 continue
 
             context = self.metric_buffer.snapshot()
@@ -1072,7 +1122,7 @@ class CoordinatorService:
                     ])
 
             if predictions and self.enable_autoscale and not self.migration_in_progress:
-                should_scale, to_add = self._compute_predictive_scaling(predictions)
+                should_scale, to_add = self._compute_predictive_upscaling(predictions)
                 if should_scale and not (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
                     n_workers = len(self.coordinator.worker_pool.get_participating_workers())
                     new_partition_num = n_workers + to_add
@@ -1081,9 +1131,7 @@ class CoordinatorService:
                 elif not should_scale:
                     # Check for downscaling opportunity if we didn't scale up
                     should_downscale, to_remove = self._compute_predictive_downscaling(predictions)
-                    if should_downscale and not (
-                        time.time() - self.last_scale_action_time < self.scale_cooldown_period
-                    ):
+                    if should_downscale:
                         await self.scale_down(to_remove)
 
     def _record_epoch_metrics(
@@ -1166,16 +1214,17 @@ class CoordinatorService:
             if not sync_complete:
                 return
 
+            reordering_payload = (
+                self.aria_metadata.global_read_reservations,
+                self.aria_metadata.global_write_set,
+                self.aria_metadata.global_read_set,
+            )
+            self.aria_metadata.reset(mt)
             await self.finalize_worker_sync(
                 mt,
-                (
-                    self.aria_metadata.global_read_reservations,
-                    self.aria_metadata.global_write_set,
-                    self.aria_metadata.global_read_set,
-                ),
+                reordering_payload,
                 Serializer.PICKLE,
             )
-            self.aria_metadata.cleanup()
 
     async def _handle_migration_done(self, _: bytes) -> None:
         mt = MessageType.MigrationDone
@@ -1254,7 +1303,14 @@ class CoordinatorService:
                         data = await reader.readexactly(8)
                         (size,) = struct.unpack(">Q", data)
                         message = await reader.readexactly(size)
-                        self.aio_task_scheduler_coord.create_task(
+                        # Unbounded: this scheduler also runs
+                        # `heartbeat_monitor_coroutine` (a perpetual loop) which
+                        # drives recovery via `wait_cluster_healthy()` — that
+                        # await is unblocked by `_handle_ready_after_recovery`
+                        # running through this same scheduler. A bounded slot
+                        # held by a suspended awaiter could starve the setter
+                        # under a large cluster.
+                        self.aio_task_scheduler_coord.create_unbounded_task(
                             self.coordinator_controller(writer, message, pool),
                         )
                 except asyncio.IncompleteReadError as e:
@@ -1520,7 +1576,11 @@ class CoordinatorService:
         logging.warning("Coordinator Booted Successfully")
         self.init_snapshot_bucket()
         logging.warning("Coordinator Connected to S3")
-        self.aio_task_scheduler_coord.create_task(self.heartbeat_monitor_coroutine())
+        # Unbounded: heartbeat_monitor is a long-lived loop that also drives
+        # recovery (awaits `wait_cluster_healthy`). It must not consume a
+        # semaphore slot while suspended, or it would permanently reduce the
+        # scheduler's capacity and could starve `_handle_ready_after_recovery`.
+        self.aio_task_scheduler_coord.create_unbounded_task(self.heartbeat_monitor_coroutine())
         logging.warning("Coordinator Heartbeat Sentinel online")
         self.snapshotting_task = asyncio.create_task(self.send_snapshot_marker())
         logging.warning("Coordinator Snapshotting online")

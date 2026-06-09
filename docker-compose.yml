@@ -31,7 +31,6 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - ./prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=365d"
@@ -44,10 +43,9 @@ services:
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-      - GF_AUTH_DISABLE_LOGIN_FORM=true 
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
     volumes:
-      - ./grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning 
+      - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/etc/grafana/dashboards
 
   worker:
@@ -65,6 +63,11 @@ services:
       - S3_SECRET_KEY=rustfsadmin
     depends_on:
       - coordinator
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: "4GB"
 
   worker-standby:
     profiles:
@@ -85,6 +88,11 @@ services:
       - S3_SECRET_KEY=rustfsadmin
     depends_on:
       - coordinator
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: "4GB"
 
 volumes:
   grafana_data:

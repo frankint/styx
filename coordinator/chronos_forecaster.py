@@ -5,12 +5,12 @@ import multiprocessing
 import time
 from typing import Any
 
-from chronos import Chronos2Pipeline
+from chronos import BaseChronosPipeline
 import pandas as pd
 import torch
 
 MIN_CONTEXT_LENGTH: int = 40
-CHRONOS_MODEL_PATH: str = "models/chronos-2"
+CHRONOS_MODEL_PATH: str = "models/chronos-bolt"
 CHRONOS_NUM_THREADS: int = 2
 
 log = logging.getLogger("chronos_forecaster")
@@ -31,7 +31,7 @@ def _forecaster_loop(
     log.warning("Loading Chronos model")
     load_start = time.time()
     try:
-        pipeline = Chronos2Pipeline.from_pretrained(
+        pipeline = BaseChronosPipeline.from_pretrained(
             CHRONOS_MODEL_PATH,
             device_map="cpu",
         )
@@ -57,7 +57,6 @@ def _forecaster_loop(
                     {
                         "predictions": {
                             "0.75": [0.0] * prediction_length,
-                            "0.9": [0.0] * prediction_length,
                         },
                     }
                 )
@@ -75,14 +74,13 @@ def _forecaster_loop(
             predictions_df = pipeline.predict_df(
                 context_df,
                 prediction_length=prediction_length,
-                quantile_levels=[0.75, 0.9],
+                quantile_levels=[0.75],
             )
 
             result_queue.put(
                 {
                     "predictions": {
                         "0.75": predictions_df["0.75"].tolist(),
-                        "0.9": predictions_df["0.9"].tolist(),
                     },
                 }
             )

@@ -1,4 +1,5 @@
 profile: random
 step_size: 5
-magnitude: 500
-seed: 102
+magnitude: 1500
+max_threshold: 20000
+seed: 889
