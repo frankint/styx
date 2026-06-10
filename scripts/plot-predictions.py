@@ -61,7 +61,8 @@ def main():
 
     # Plot predictions
     # To avoid a messy plot, we'll plot the prediction horizon for every Nth point as a faint line.
-    step = max(1, len(relative_times) // 20) # Show ~20 distinct forecast horizons
+    # step = max(1, len(relative_times) // 20) # Show ~20 distinct forecast horizons
+    step = 1
 
     # Each prediction point corresponds to 1 second (since AggregatingMetricBuffer bucket_interval=1.0)
     time_per_prediction_step = 1.0

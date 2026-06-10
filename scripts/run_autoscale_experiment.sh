@@ -23,7 +23,7 @@ num_standby_workers=${12:-$n_part}
 [ -n "${15}" ] && use_composite_keys=${15}
 [ -n "${16}" ] && regenerate_tpcc_data=${16}
 kill_at="-1" 
-autoscaling_enabled="true"
+autoscaling_enabled="${ENABLE_AUTOSCALE:-true}"
 
 # Deployment mode configuration (read from environment).
 # Modes: docker-compose | k8s-minikube | k8s-cluster
@@ -89,7 +89,7 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
 
 else
     # docker-compose mode
-    export INITIAL_WORKERS=1
+    export INITIAL_WORKERS=${INITIAL_WORKERS:-1}
     bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$autoscaling_enabled"
     docker compose --profile autoscale up --scale worker-standby="$num_standby_workers" -d worker-standby >/dev/null
 

@@ -34,6 +34,7 @@ def _forecaster_loop(
     num_layers: int,
     learning_rate: float,
     max_context_length: int | None,
+    downsample_rate: int,
 ) -> None:
     """Entry point for the RNN forecaster child process."""
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s [RNN_FORECASTER] %(message)s")
@@ -63,14 +64,25 @@ def _forecaster_loop(
             if max_context_length is not None and len(series) > max_context_length:
                 series = series[-max_context_length:]
 
-            if len(series) < 10:
+            # 1. Downsample history
+            if downsample_rate > 1:
+                trim_offset = len(series) % downsample_rate
+                trimmed_series = series[trim_offset:]
+                downsampled_series = [
+                    float(np.mean(trimmed_series[i : i + downsample_rate]))
+                    for i in range(0, len(trimmed_series), downsample_rate)
+                ]
+            else:
+                downsampled_series = series
+
+            if len(downsampled_series) < 10:
                 log.warning("RNN | Not enough data to forecast")
                 fallback = [series[-1]] * prediction_length if series else [0.0] * prediction_length
                 result_queue.put({"predictions": {"truth": fallback}})
                 continue
 
             scaler = MinMaxScaler()
-            data_scaled = scaler.fit_transform(np.array(series).reshape(-1, 1))
+            data_scaled = scaler.fit_transform(np.array(downsampled_series).reshape(-1, 1))
 
             seq_length = min(len(data_scaled) - 1, 10)
             X = torch.tensor(
@@ -79,7 +91,7 @@ def _forecaster_loop(
             )
             y = torch.tensor(data_scaled[seq_length:], dtype=torch.float32)
 
-            # Online fine-tuning (2 gradient descents since we want the weights to change more than normal for online learning purposes)
+            # Online fine-tuning (2 gradient descents)
             model.train()
             for _ in range(2):
                 optimizer.zero_grad()
@@ -94,14 +106,22 @@ def _forecaster_loop(
                 data_scaled[-seq_length:].reshape(1, seq_length, 1), dtype=torch.float32
             )
 
+            downsampled_horizon = max(1, (prediction_length + downsample_rate - 1) // downsample_rate)
+
             with torch.no_grad():
-                for _ in range(prediction_length):
+                for _ in range(downsampled_horizon):
                     pred = model(current_seq)
                     preds_scaled.append(pred.item())
                     current_seq = torch.cat((current_seq[:, 1:, :], pred.unsqueeze(1)), dim=1)
 
             preds = scaler.inverse_transform(np.array(preds_scaled).reshape(-1, 1)).flatten()
-            preds_list = np.clip(preds, 0, max(series) * 1.5).tolist()
+            raw_preds_list = np.clip(preds, 0, max(series) * 1.5).tolist()
+
+            # 2. Upsample back to second-level resolution
+            preds_list = []
+            for p in raw_preds_list:
+                preds_list.extend([p] * downsample_rate)
+            preds_list = preds_list[:prediction_length]
 
             result_queue.put({"predictions": {"truth": preds_list}})
             log.warning("RNN | forecast completed in %.2fs", time.time() - start_time)
@@ -120,12 +140,14 @@ class RNNForecaster:
         num_layers: int = 1,
         learning_rate: float = 0.01,
         max_context_length: int | None = None,
+        downsample_rate: int = 1,
     ) -> None:
         self.rnn_type = rnn_type
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.learning_rate = learning_rate
         self.max_context_length = max_context_length
+        self.downsample_rate = downsample_rate
 
         ctx = multiprocessing.get_context("spawn")
         self._request_queue: multiprocessing.Queue = ctx.Queue(maxsize=2)
@@ -145,6 +167,7 @@ class RNNForecaster:
                 self.num_layers,
                 self.learning_rate,
                 self.max_context_length,
+                self.downsample_rate,
             ),
             daemon=True,
         )

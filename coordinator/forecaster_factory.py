@@ -11,6 +11,7 @@ def create_forecaster():
     max_context_length = os.getenv("FORECASTER_MAX_CONTEXT_LENGTH")
     if max_context_length is not None:
         max_context_length = int(max_context_length)
+    downsample_rate = max(1, int(os.getenv("DOWNSAMPLE_RATE", "1")))
     print(f"USING FORECASTER: {forecaster_type}")
     if forecaster_type == "chronos":
         try:
@@ -25,7 +26,6 @@ def create_forecaster():
         except ImportError:
             from custom_chronos_forecaster import CustomChronosForecaster
         model_path = os.getenv("CHRONOS_MODEL_PATH", "models/chronos-2")
-        downsample_rate = int(os.getenv("CHRONOS_DOWNSAMPLE_RATE", "1"))
         return CustomChronosForecaster(
             model_path=model_path,
             downsample_rate=downsample_rate,
@@ -46,6 +46,7 @@ def create_forecaster():
             num_layers=num_layers,
             learning_rate=learning_rate,
             max_context_length=max_context_length,
+            downsample_rate=downsample_rate,
         )
 
     elif forecaster_type == "river":
@@ -57,7 +58,7 @@ def create_forecaster():
         d = int(os.getenv("RIVER_D", "0"))
         q = int(os.getenv("RIVER_Q", "0"))
         m = int(os.getenv("RIVER_M", "30"))
-        return RiverForecaster(p=p, d=d, q=q, m=m)
+        return RiverForecaster(p=p, d=d, q=q, m=m, downsample_rate=downsample_rate)
 
     else:
         raise ValueError(f"Unknown forecaster type: {forecaster_type}")

@@ -17,6 +17,7 @@ def _forecaster_loop(
     d: int,
     q: int,
     m: int,
+    downsample_rate: int,
 ) -> None:
     """Entry point for the River forecaster child process."""
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s [RIVER_FORECASTER] %(message)s")
@@ -24,6 +25,7 @@ def _forecaster_loop(
     log.warning("Initializing River SNARIMAX model (p=%d, d=%d, q=%d, m=%d)", p, d, q, m)
     model = time_series.SNARIMAX(p=p, d=d, q=q, m=m)
     processed_count = 0
+    buffer = []
 
     while True:
         req: dict[str, Any] | None = request_queue.get()
@@ -41,12 +43,21 @@ def _forecaster_loop(
             if len(series) > processed_count:
                 new_points = series[processed_count:]
                 for val in new_points:
-                    model.learn_one(val)
+                    buffer.append(val)
+                    if len(buffer) == downsample_rate:
+                        model.learn_one(sum(buffer) / len(buffer))
+                        buffer.clear()
                 processed_count = len(series)
 
-            # Generate forecast
-            raw_forecasts = model.forecast(horizon=prediction_length)
-            preds_list = [float(f) for f in raw_forecasts]
+            # Generate downsampled forecast
+            downsampled_horizon = max(1, (prediction_length + downsample_rate - 1) // downsample_rate)
+            raw_forecasts = model.forecast(horizon=downsampled_horizon)
+
+            # Upsample back to second-level resolution
+            preds_list = []
+            for f in raw_forecasts:
+                preds_list.extend([float(f)] * downsample_rate)
+            preds_list = preds_list[:prediction_length]
 
             result_queue.put({"predictions": {"truth": preds_list}})
             log.warning("RIVER | forecast completed in %.2fs", time.time() - start_time)
@@ -64,11 +75,13 @@ class RiverForecaster:
         d: int = 0,
         q: int = 0,
         m: int = 30,
+        downsample_rate: int = 1,
     ) -> None:
         self.p = p
         self.d = d
         self.q = q
         self.m = m
+        self.downsample_rate = downsample_rate
 
         ctx = multiprocessing.get_context("spawn")
         self._request_queue: multiprocessing.Queue = ctx.Queue(maxsize=2)
@@ -87,6 +100,7 @@ class RiverForecaster:
                 self.d,
                 self.q,
                 self.m,
+                self.downsample_rate,
             ),
             daemon=True,
         )
