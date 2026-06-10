@@ -89,6 +89,7 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
 
 else
     # docker-compose mode
+    export INITIAL_WORKERS=1
     bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$autoscaling_enabled"
     docker compose --profile autoscale up --scale worker-standby="$num_standby_workers" -d worker-standby >/dev/null
 

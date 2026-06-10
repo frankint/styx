@@ -177,3 +177,4 @@ charts/styx-cluster/charts
 raw_predictions/
 predictions.png
 predictions20260607_191125.png
+!data/cluster_summary.csv
