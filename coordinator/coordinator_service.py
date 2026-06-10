@@ -994,15 +994,17 @@ class CoordinatorService:
 
         n_workers = len(self.coordinator.worker_pool.get_live_workers())
         raw_capacity = self.system_capacity_estimator.estimate_system_capacity()
-        if raw_capacity is None or (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
+        if raw_capacity is None:
             return False, 0
+            
+        # Update EWMA *before* checking cooldown so the moving average stays accurate
         if self._capacity_ewma is None:
             self._capacity_ewma = raw_capacity
         else:
             self._capacity_ewma += self._capacity_ewma_alpha * (raw_capacity - self._capacity_ewma)
         system_capacity = self._capacity_ewma
 
-        # Determine peak predicted value based on model type (with/without confidence support)
+        # Determine peak predicted value based on model type
         if "truth" in predictions:
             # Treat point forecast as absolute truth
             peak_predicted = max(predictions["truth"])
@@ -1010,15 +1012,17 @@ class CoordinatorService:
         else:
             # Standard Chronos confidence policy
             peak_predicted = max(predictions.get("0.75", [0.0]))
-            logging.warning(f"PREDICTIVE (Probabilistic) | peak_p75={peak_predicted:.0f}")
+            logging.warning(f"PREDICTIVE (Probabilistic) | peak_predicted={peak_predicted:.0f}")
 
         headroom_factor = 1
         effective_capacity = system_capacity * headroom_factor
+        
         logging.warning(
-            f"PREDICTIVE | confidence={confidence:.2f} | peak_p75={peak_p75:.0f} | "
+            f"PREDICTIVE | confidence={confidence:.2f} | peak_predicted={peak_predicted:.0f} | "
             f"raw_capacity={raw_capacity:.0f} | effective={effective_capacity:.0f}"
         )
-        if peak_p75 <= effective_capacity:
+        
+        if peak_predicted <= effective_capacity:
             return False, 0
 
         # Point forecast scaling policy: Only scale if predictions represent a significant spike (e.g. > 15% increase)
@@ -1028,15 +1032,21 @@ class CoordinatorService:
                 logging.warning("PREDICTIVE | Predicted spike is too minor, skipping scaling action")
                 return False, 0
 
+        # Enforce cooldown *after* all logging and EWMA math, but *before* taking action
+        if time.time() - self.last_scale_action_time < self.scale_cooldown_period:
+            return False, 0
+
         per_worker_capacity = system_capacity / max(n_workers, 1)
         n_needed = max(
             n_workers + 1,
             int(peak_predicted / (per_worker_capacity * headroom_factor)) + 1,
         )
+        
         # Don't more than double the cluster in one step
         to_add = min(n_needed - n_workers, n_workers)
         # scale_up only activates workers from _standby_queue; clamp and skip if none left
         to_add = self._resolve_scale_up_workers(to_add)
+        
         if to_add <= 0:
             return False, 0
 
@@ -1053,6 +1063,7 @@ class CoordinatorService:
             or time.time() < self._downscale_suppressed_until
         ):
             return False, 0
+            
         n_workers = len(self.coordinator.worker_pool.get_live_workers())
         # Backlog must be essentially zero before considering downscale,
         # use value a little above zero to account for timing jitter on the worker side
@@ -1061,14 +1072,20 @@ class CoordinatorService:
             return False, 0
 
         per_worker_cap = self._capacity_ewma / n_workers
+        
         # Determine peak expected demand
         peak_demand = self.tps_sliding_window.average() or 0.0
         if predictions:
             if "truth" in predictions:
                 peak_predicted = max(predictions["truth"])
             else:
-                peak_predicted = max(predictions.get("0.9", [0.0]))
+                # Assuming you want to fall back to p75 based on the updated snippet, or p90 from the old snippet. 
+                # p75 is used here to match your updated code.
+                peak_predicted = max(predictions.get("0.75", [0.0]))
             peak_demand = max(peak_demand, peak_predicted)
+
+        if peak_demand <= 0:
+            return False, 0
 
         # Can n workers handle peak demand with headroom?
         to_remove = 0
