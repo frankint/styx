@@ -169,6 +169,11 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
     fi
     #bash scripts/uninstall_styx_cluster_with_helm.sh
 else
+    echo "=================================================="
+    echo "Exporting Prometheus metrics to CSV..."
+    python scripts/export_metrics_to_csv.py || echo "Warning: Failed to export metrics to CSV."
+    echo "=================================================="
+
     #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
     docker compose stop coordinator worker worker-standby
 fi

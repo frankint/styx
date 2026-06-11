@@ -47,6 +47,8 @@ from worker.operator_state.stateless import Stateless
 from worker.transactional_protocols.aria import AriaProtocol
 from worker.util.container_monitor import ContainerMonitor
 
+SUPER_VERBOSE = True
+
 SERVER_PORT: int = 5000
 PROTOCOL_PORT: int = 6000
 SNAPSHOTTING_PORT: int = 7000
@@ -235,9 +237,20 @@ class Worker:
             self.completed_repartitioning_event.set()
 
     async def worker_controller(self, data: bytes) -> None:
-        msg_type = self.networking.get_msg_type(data)
-        handler = self._message_handlers.get(msg_type, self._handle_unknown)
-        await handler(data, msg_type)
+        try:
+            msg_type = self.networking.get_msg_type(data)
+            if SUPER_VERBOSE:
+                # logging.warning(f"WORKER CONTROLLER: Received message of type {msg_type}")
+                pass
+            handler = self._message_handlers.get(msg_type, self._handle_unknown)
+            await handler(data, msg_type)
+            if SUPER_VERBOSE:
+                # logging.warning(f"WORKER CONTROLLER: Finished handling message of type {msg_type}")
+                pass
+        except Exception as e:
+            if SUPER_VERBOSE:
+                logging.warning(f"WORKER CONTROLLER: Exception handling message: {e}", exc_info=True)
+            raise
 
     # -----------------------
     # Small shared helpers
@@ -352,21 +365,24 @@ class Worker:
 
     async def _handle_init_migration(self, data: bytes, _: MessageType) -> None:
         """Phase A: rehash in background while protocol keeps running."""
+        logging.warning(f"DEBUG_WORKER | _handle_init_migration started")
         try:
             logging.warning(f"MIGRATION | PHASE A START at {time.time_ns() // 1_000_000}")
             self._pending_migration_data = data
 
             if self._is_standby():
-                logging.warning("MIGRATION | PHASE A | standby worker — nothing to repartition")
+                logging.warning("DEBUG_WORKER | MIGRATION | PHASE A | standby worker — nothing to repartition")
             else:
+                logging.warning("DEBUG_WORKER | Starting background repartition")
                 t_repart_start = timer()
                 await self._migration_background_repartition()
                 t_repart_end = timer()
                 logging.warning(
-                    f"MIGRATION | PHASE A REHASHING DONE | took: {t_repart_end - t_repart_start}",
+                    f"DEBUG_WORKER | MIGRATION | PHASE A REHASHING DONE | took: {t_repart_end - t_repart_start}",
                 )
 
             # Signal coordinator that rehashing is done (no counters — those come in Phase B)
+            logging.warning("DEBUG_WORKER | Sending MigrationRepartitioningDone to coordinator")
             await self.networking.send_message(
                 DISCOVERY_HOST,
                 DISCOVERY_PORT,
@@ -374,9 +390,10 @@ class Worker:
                 msg_type=MessageType.MigrationRepartitioningDone,
                 serializer=Serializer.NONE,
             )
-            logging.warning("MIGRATION | PHASE A COMPLETE — waiting for coordinator to stop protocol")
+            logging.warning("DEBUG_WORKER | MIGRATION | PHASE A COMPLETE — waiting for coordinator to stop protocol")
         except Exception as e:
-            logging.error(f"Uncaught exception during migration Phase A: {e}")
+            logging.error(f"DEBUG_WORKER | Uncaught exception during migration Phase A: {e}")
+            logging.warning(f"DEBUG_WORKER | Uncaught exception during migration Phase A: {e}", exc_info=True)
 
     async def _migration_stop_protocol(self) -> None:
         if self.function_execution_protocol is None:
@@ -443,13 +460,9 @@ class Worker:
             ).get_partitioner()
             for operator_partition in operator_partitions:
                 logging.warning(f"Sending: {operator_partition} for repartitioning")
-                # Offload key list copy to a thread (Step 8)
-                key_list = await loop.run_in_executor(
-                    None,
-                    lambda op=operator_partition: list(
-                        self.local_state.get_operator_data_for_repartitioning(op).keys(),
-                    ),
-                )
+                # Copy keys synchronously in the main thread to avoid RuntimeError
+                # since the Aria protocol is mutating the dictionary concurrently
+                key_list = list(self.local_state.get_operator_data_for_repartitioning(operator_partition).keys())
                 loop.run_in_executor(
                     self.pool,
                     self.rehash_only,
@@ -661,6 +674,7 @@ class Worker:
             if in_data:
                 should_signal = True  # batch already delivered
             elif in_remote:
+                logging.error(f"BUG CONFIRMATION | Ghost key {key} detected! `in_remote` is True, so `should_signal` is set to False. The transaction waiting on this key will now block forever!")
                 should_signal = False  # async in flight — batch handler will signal
             else:
                 should_signal = True  # source has nothing; treat as absent
@@ -772,6 +786,7 @@ class Worker:
             )
         except Exception as e:
             logging.error(f"Uncaught exception during migration Phase B: {e}")
+            logging.warning(f"DEBUG_WORKER | Uncaught exception during migration Phase B: {e}", exc_info=True)
 
     async def _handle_migration_done(self, data: bytes, _: MessageType) -> None:
         (
@@ -894,7 +909,7 @@ class Worker:
         while True:
             try:
                 await consumer.start()
-            except UnknownTopicOrPartitionError, KafkaConnectionError:
+            except (UnknownTopicOrPartitionError, KafkaConnectionError):
                 await asyncio.sleep(1)
                 logging.warning(
                     f"Kafka at {KAFKA_URL} not ready yet, sleeping for 1 second",
@@ -963,9 +978,13 @@ class Worker:
                 # bounded scheduler would let suspended handlers hog slots and
                 # starve the setter. Control volume is low so no backpressure
                 # cost.
+                if SUPER_VERBOSE:
+                    logging.warning("WORKER CONTROL QUEUE: Processing new message from control queue")
                 self.aio_task_scheduler.create_unbounded_task(self.worker_controller(message))
             except Exception as e:
                 logging.error(f"Error while processing control-plane message: {e}")
+                if SUPER_VERBOSE:
+                    logging.warning(f"WORKER CONTROL QUEUE EXCEPTION: {e}", exc_info=True)
             finally:
                 self.control_queue.task_done()
 
@@ -987,6 +1006,9 @@ class Worker:
                 proto = self.function_execution_protocol
                 if proto is not None:
                     msg_type = proto.networking.get_msg_type(message)
+                    if SUPER_VERBOSE:
+                        # logging.warning(f"WORKER PROTOCOL QUEUE: Received message of type {msg_type}")
+                        pass
                     handler = proto.protocol_handlers_map.get(msg_type)
                     if handler is None:
                         logging.error(
@@ -994,6 +1016,9 @@ class Worker:
                         )
                     else:
                         await handler(message)
+                        if SUPER_VERBOSE:
+                            # logging.warning(f"WORKER PROTOCOL QUEUE: Finished handling message of type {msg_type}")
+                            pass
                 else:
                     msg_type = self.protocol_networking.get_msg_type(message)
                     logging.debug(
@@ -1001,6 +1026,8 @@ class Worker:
                     )
             except Exception as e:
                 logging.exception(f"Error while processing protocol message: {e}")
+                if SUPER_VERBOSE:
+                    logging.warning(f"WORKER PROTOCOL QUEUE EXCEPTION: {e}", exc_info=True)
             finally:
                 self.protocol_queue.task_done()
 
@@ -1020,6 +1047,8 @@ class Worker:
                 pass
             except Exception as e:
                 logging.error(f"Unexpected error in worker TCP request_handler: {e}")
+                if SUPER_VERBOSE:
+                    logging.warning(f"WORKER TCP SERVICE EXCEPTION: {e}", exc_info=True)
             finally:
                 logging.info("Closing the connection")
                 writer.close()
@@ -1058,6 +1087,8 @@ class Worker:
                 pass
             except Exception as e:
                 logging.error(f"Unexpected error in protocol TCP request_handler: {e}")
+                if SUPER_VERBOSE:
+                    logging.warning(f"WORKER PROTOCOL TCP SERVICE EXCEPTION: {e}", exc_info=True)
             finally:
                 logging.info("Closing protocol connection")
                 writer.close()

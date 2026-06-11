@@ -187,12 +187,15 @@ class StyxKafkaIngress(BaseIngress):
                         TopicPartition(operator[0], operator[1]),
                         offset + 1,
                     )
-            except UnknownTopicOrPartitionError, KafkaConnectionError:
+            except (UnknownTopicOrPartitionError, KafkaConnectionError):
                 await asyncio.sleep(1)
                 logging.warning(
                     f"Kafka at {self.kafka_url} not ready yet, sleeping for 1 second",
                 )
                 continue
+            except Exception as e:
+                logging.error(f"FATAL: Uncaught exception in start_kafka_consumer initialization: {e}", exc_info=True)
+                raise
             break
         try:
             # Consume messages
@@ -219,5 +222,10 @@ class StyxKafkaIngress(BaseIngress):
                             await asyncio.gather(*self.send_message_tasks)
                             self.send_message_tasks = []
                     self.messages_available.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.error(f"FATAL: Uncaught exception in start_kafka_consumer poll loop: {e}", exc_info=True)
+            raise
         finally:
             await self.kafka_consumer.stop()

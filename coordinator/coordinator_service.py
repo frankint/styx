@@ -51,6 +51,8 @@ import json
 import time
 import os
 
+SUPER_VERBOSE = True
+
 SERVER_PORT = 8888
 PROTOCOL_PORT = 8889
 
@@ -507,12 +509,23 @@ class CoordinatorService:
         data: bytes,
         pool: concurrent.futures.ProcessPoolExecutor,
     ) -> None:
-        mt: MessageType = self.networking.get_msg_type(data)
-        handler = self._coordinator_handlers_map.get(mt)
-        if handler is None:
-            logging.error(f"COORDINATOR SERVER: Non supported message type: {mt}")
-            return
-        await handler(transport, data, pool)
+        try:
+            mt: MessageType = self.networking.get_msg_type(data)
+            if SUPER_VERBOSE:
+                # logging.warning(f"COORDINATOR SERVER: Received message of type {mt}")
+                pass
+            handler = self._coordinator_handlers_map.get(mt)
+            if handler is None:
+                logging.error(f"COORDINATOR SERVER: Non supported message type: {mt}")
+                return
+            await handler(transport, data, pool)
+            if SUPER_VERBOSE:
+                # logging.warning(f"COORDINATOR SERVER: Finished handling message of type {mt}")
+                pass
+        except Exception as e:
+            if SUPER_VERBOSE:
+                logging.warning(f"COORDINATOR SERVER: Exception in coordinator_controller handling message: {e}", exc_info=True)
+            raise
 
     # ------------------------
     # Handlers
@@ -550,7 +563,9 @@ class CoordinatorService:
             if not self.coordinator.graph_submitted:
                 logging.warning("No graph exists in the cluster, cannot initiate an update!")
                 return
+            logging.warning("compatible, migration_required = graph.compare_with(self.coordinator.submitted_graph)")
             compatible, migration_required = graph.compare_with(self.coordinator.submitted_graph)
+            logging.warning("compatible, migration_required = graph.compare_with(self.coordinator.submitted_graph) done")
             if not compatible:
                 logging.warning("Graph is incompatible!")
                 return
@@ -593,18 +608,21 @@ class CoordinatorService:
         ___: concurrent.futures.ProcessPoolExecutor,
     ) -> None:
         mt = MessageType.MigrationRepartitioningDone
-        logging.warning("Migration repartitioning done received!")
+        logging.warning("DEBUG_MIGRATION | Migration repartitioning done received!")
 
         async with self.networking_locks[mt]:
             sync_complete: bool = await self.migration_metadata.repartitioning_done()
 
-            logging.warning(f"Migration repartitioning is complete: {sync_complete}")
+            logging.warning(f"DEBUG_MIGRATION | Migration repartitioning is complete: {sync_complete}")
 
             if not sync_complete:
                 return
 
+            logging.warning("DEBUG_MIGRATION | Calling finalize_migration_repartition")
             await self.finalize_migration_repartition()
+            logging.warning("DEBUG_MIGRATION | Calling migration_metadata.cleanup(mt)")
             await self.migration_metadata.cleanup(mt)
+            logging.warning("DEBUG_MIGRATION | _handle_migration_repartitioning_done finished")
 
     async def _handle_migration_init_done(
         self,
@@ -761,14 +779,25 @@ class CoordinatorService:
         await asyncio.sleep(0)
 
     async def protocol_controller(self, data: bytes) -> None:
-        mt: MessageType = self.protocol_networking.get_msg_type(data)
-        handler = self._protocol_controller_handlers_map.get(mt)
-        if handler is None:
-            logging.error(
-                f"COORDINATOR PROTOCOL SERVER: Non supported message type: {mt}",
-            )
-            return
-        await handler(data)
+        try:
+            mt: MessageType = self.protocol_networking.get_msg_type(data)
+            if SUPER_VERBOSE:
+                # logging.warning(f"COORDINATOR PROTOCOL SERVER: Received message of type {mt}")
+                pass
+            handler = self._protocol_controller_handlers_map.get(mt)
+            if handler is None:
+                logging.error(
+                    f"COORDINATOR PROTOCOL SERVER: Non supported message type: {mt}",
+                )
+                return
+            await handler(data)
+            if SUPER_VERBOSE:
+                # logging.warning(f"COORDINATOR PROTOCOL SERVER: Finished handling message of type {mt}")
+                pass
+        except Exception as e:
+            if SUPER_VERBOSE:
+                logging.warning(f"COORDINATOR PROTOCOL SERVER: Exception handling message: {e}", exc_info=True)
+            raise
 
     # ------------------------
     # Handlers
@@ -962,11 +991,24 @@ class CoordinatorService:
                     await self.scale_up(new_partition_num, to_add)
 
     def _estimate_migration_time(self, total_keys: int) -> float:
-        estimated_migration_time = (
-            total_keys * self.epoch_duration_window.average() / ASYNC_MIGRATION_BATCH_SIZE
-        ) / 1000.0
-        self.migration_time_window.add(estimated_migration_time)
-        return self.migration_time_window.average()
+            avg_epoch_duration = self.epoch_duration_window.average()
+
+            # Guard against an empty window returning None
+            if avg_epoch_duration is None:
+                logging.warning("avg_epoch_duration IS None!")
+                # Return 0.0, or substitute a sensible DEFAULT_EPOCH_DURATION
+                return 0.0 
+
+            estimated_migration_time = (
+                total_keys * avg_epoch_duration / ASYNC_MIGRATION_BATCH_SIZE
+            ) / 1000.0
+            
+            self.migration_time_window.add(estimated_migration_time)
+            
+            # Ensure we always return a float, just in case migration_time_window 
+            # acts identically and returns None on its first evaluation
+            final_avg = self.migration_time_window.average()
+            return final_avg if final_avg is not None else estimated_migration_time
 
     def _resolve_scale_up_workers(self, to_add: int) -> int:
         """Scale up only activates workers from _standby_queue; clamp and skip if none left.
@@ -1104,52 +1146,79 @@ class CoordinatorService:
     async def chronos_forecast_loop(self) -> None:
         """Periodically submit metric snapshots to the Chronos forecaster
         process and poll for results.  Runs as a long-lived coroutine."""
+        logging.warning("DEBUG_FORECASTER | chronos_forecast_loop started")
         while True:
             await asyncio.sleep(FORECASTER_FORECAST_INTERVAL)
-            if self.chronos_forecaster is None or not self.chronos_forecaster.is_alive or self.migration_in_progress:
-                continue
+            try:
+                logging.warning("DEBUG_FORECASTER | Loop iteration started")
+                if self.chronos_forecaster is None:
+                    logging.warning("DEBUG_FORECASTER | chronos_forecaster is None, continuing")
+                    continue
+                if not self.chronos_forecaster.is_alive:
+                    logging.warning("DEBUG_FORECASTER | chronos_forecaster is not alive, continuing")
+                    continue
+                if self.migration_in_progress:
+                    logging.warning("DEBUG_FORECASTER | migration_in_progress is True, continuing")
+                    continue
 
-            context = self.metric_buffer.snapshot()
-            if not context:
-                continue
+                context = self.metric_buffer.snapshot()
+                if not context:
+                    logging.warning("DEBUG_FORECASTER | metric_buffer.snapshot() returned empty context, continuing")
+                    continue
 
-            estimated_migration_time = self._estimate_migration_time(self.total_keys)
-            logging.warning(f"Estimated migration time: {estimated_migration_time} seconds")
+                estimated_migration_time = self._estimate_migration_time(self.total_keys)
+                logging.warning(f"DEBUG_FORECASTER | Estimated migration time: {estimated_migration_time} seconds")
 
-            min_prediction_horizon = 10
-            self.chronos_forecaster.submit(
-                # context, prediction_length=min(max(min_prediction_horizon, ceil(estimated_migration_time)), 20)
-                context, prediction_length=max(min_prediction_horizon, ceil(estimated_migration_time))
-            )
-            predictions = self.chronos_forecaster.poll()
-            logging.warning(f"FORECASTER | predictions: {predictions}")
+                min_prediction_horizon = 10
+                logging.warning("DEBUG_FORECASTER | submitting to forecaster")
+                self.chronos_forecaster.submit(
+                    context, prediction_length=max(min_prediction_horizon, ceil(estimated_migration_time))
+                )
+                logging.warning("DEBUG_FORECASTER | polling forecaster")
+                predictions = self.chronos_forecaster.poll()
+                logging.warning(f"DEBUG_FORECASTER | predictions: {predictions}")
 
-            if predictions:
-                current_actual_rate = context.get("input_rate", [0.0])[-1]
+                if predictions:
+                    current_actual_rate = context.get("input_rate", [0.0])[-1]
+                    forecast_key = "truth" if "truth" in predictions else "0.75"
+                    forecast_array = predictions.get(forecast_key, [])
+                    with open(self.prediction_log_file, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            time.time(),
+                            current_actual_rate,
+                            json.dumps(forecast_array)
+                        ])
 
-                forecast_key = "truth" if "truth" in predictions else "0.75"
-                forecast_array = predictions.get(forecast_key, [])
-
-                with open(self.prediction_log_file, "a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        time.time(),
-                        current_actual_rate,
-                        json.dumps(forecast_array)
-                    ])
-
-            if predictions and self.enable_autoscale and not self.migration_in_progress:
-                should_scale, to_add = self._compute_predictive_upscaling(predictions)
-                if should_scale and not (time.time() - self.last_scale_action_time < self.scale_cooldown_period):
-                    n_workers = len(self.coordinator.worker_pool.get_participating_workers())
-                    new_partition_num = n_workers + to_add
-                    await self.scale_up(new_partition_num, to_add)
-
-                elif not should_scale:
-                    # Check for downscaling opportunity if we didn't scale up
-                    should_downscale, to_remove = self._compute_predictive_downscaling(predictions)
-                    if should_downscale:
-                        await self.scale_down(to_remove)
+                logging.warning(f"DEBUG_FORECASTER | Predictions ready? {bool(predictions)} | Enable autoscale: {self.enable_autoscale} | Migration: {self.migration_in_progress}")
+                if predictions and self.enable_autoscale and not self.migration_in_progress:
+                    should_scale, to_add = self._compute_predictive_upscaling(predictions)
+                    logging.warning(f"DEBUG_FORECASTER | should_scale: {should_scale}, to_add: {to_add}")
+                    if should_scale:
+                        time_since_scale = time.time() - self.last_scale_action_time
+                        logging.warning(f"DEBUG_FORECASTER | time_since_scale: {time_since_scale}, cooldown: {self.scale_cooldown_period}")
+                        if not (time_since_scale < self.scale_cooldown_period):
+                            n_workers = len(self.coordinator.worker_pool.get_participating_workers())
+                            new_partition_num = n_workers + to_add
+                            logging.warning(f"DEBUG_FORECASTER | Calling scale_up({new_partition_num}, {to_add})")
+                            await self.scale_up(new_partition_num, to_add)
+                            logging.warning("DEBUG_FORECASTER | scale_up finished")
+                        else:
+                            logging.warning("DEBUG_FORECASTER | Scaling skipped due to cooldown")
+                    elif not should_scale:
+                        should_downscale, to_remove = self._compute_predictive_downscaling(predictions)
+                        logging.warning(f"DEBUG_FORECASTER | should_downscale: {should_downscale}, to_remove: {to_remove}")
+                        if should_downscale:
+                            logging.warning(f"DEBUG_FORECASTER | Calling scale_down({to_remove})")
+                            await self.scale_down(to_remove)
+                            logging.warning("DEBUG_FORECASTER | scale_down finished")
+                logging.warning("DEBUG_FORECASTER | Loop iteration finished")
+            except asyncio.CancelledError:
+                # Re-raise so the task can be cancelled gracefully during shutdown
+                raise
+            except Exception as e:
+                # Catch any errors in scaling, forecasting logic, or kafka expansion
+                logging.exception("DEBUG_FORECASTER | Forecaster loop crashed", exc_info=e)
 
     def _record_epoch_metrics(
         self,
@@ -1245,28 +1314,31 @@ class CoordinatorService:
 
     async def _handle_migration_done(self, _: bytes) -> None:
         mt = MessageType.MigrationDone
+        logging.warning("DEBUG_MIGRATION | Coordinator received MigrationDone from a worker")
         async with self.networking_locks[mt]:
             sync_complete: bool = await self.migration_metadata.set_empty_sync_done(mt)
             logging.warning(
-                f"MIGRATION | MigrationDone | {self.migration_metadata.sync_sum}",
+                f"DEBUG_MIGRATION | MIGRATION | MigrationDone | sync_sum={self.migration_metadata.sync_sum} | complete={sync_complete}"
             )
             if not sync_complete:
                 return
 
+            logging.warning("DEBUG_MIGRATION | Coordinator completing migration")
             end_time = time.time_ns()
             self.migration_end_time_gauge.set(end_time / 1_000_000)
             self.migration_end_time = end_time
             self.migration_end_count.inc()
             migration_duration = (self.migration_end_time - self.migration_start_time) / 1_000_000_000
-            logging.warning(f"MIGRATION_DURATION: {migration_duration:.2f} s")
+            logging.warning(f"DEBUG_MIGRATION | MIGRATION_DURATION: {migration_duration:.2f} s")
             await self.migration_metadata.cleanup(mt)
             self.migration_in_progress = False
+            logging.warning("DEBUG_MIGRATION | Set migration_in_progress = False")
 
             # Deactivate victim workers after scale-down migration completes
             if self._pending_downscale:
                 non_participating_workers = self.coordinator.worker_pool.get_non_participating_workers()
                 logging.warning(
-                    f"SCALE_DOWN | deactivating {len(non_participating_workers)} idle workers after migration"
+                    f"DEBUG_MIGRATION | SCALE_DOWN | deactivating {len(non_participating_workers)} idle workers after migration"
                 )
                 for worker in non_participating_workers:
                     deactivated = self.coordinator.worker_pool.deactivate_to_standby(worker.worker_id)
@@ -1277,8 +1349,10 @@ class CoordinatorService:
                 self.live_worker_count_gauge.set(len(self.coordinator.worker_pool.get_live_workers()))
 
             self.last_scale_action_time = time.time()
-            logging.warning("Restarting the snapshotting mechanism")
+            logging.warning(f"DEBUG_MIGRATION | Set last_scale_action_time to {self.last_scale_action_time}")
+            logging.warning("DEBUG_MIGRATION | Restarting the snapshotting mechanism")
             self.snapshotting_task = asyncio.create_task(self.send_snapshot_marker())
+            logging.warning("self.snapshotting_task = asyncio.create_task(self.send_snapshot_marker())")
 
     async def start_puller(self) -> None:
         async def request_handler(reader: StreamReader, writer: StreamWriter) -> None:
@@ -1291,8 +1365,13 @@ class CoordinatorService:
                     )
             except asyncio.IncompleteReadError as e:
                 logging.info(f"Client disconnected unexpectedly: {e}")
+                if SUPER_VERBOSE:
+                    logging.warning(f"COORDINATOR PULLER: Client disconnected unexpectedly: {e}", exc_info=True)
             except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                if SUPER_VERBOSE:
+                    logging.warning(f"COORDINATOR PULLER: Uncaught exception: {e}", exc_info=True)
             finally:
                 logging.info("Closing the connection")
                 writer.close()
@@ -1332,8 +1411,13 @@ class CoordinatorService:
                         )
                 except asyncio.IncompleteReadError as e:
                     logging.info(f"Client disconnected unexpectedly: {e}")
+                    if SUPER_VERBOSE:
+                        logging.warning(f"COORDINATOR TCP SERVICE: Client disconnected unexpectedly: {e}", exc_info=True)
                 except asyncio.CancelledError:
                     pass
+                except Exception as e:
+                    if SUPER_VERBOSE:
+                        logging.warning(f"COORDINATOR TCP SERVICE: Uncaught exception: {e}", exc_info=True)
                 finally:
                     logging.info("Closing the connection")
                     writer.close()
@@ -1348,18 +1432,16 @@ class CoordinatorService:
                 await server.serve_forever()
 
     async def finalize_migration_repartition(self) -> None:
-        # Acquire the SyncCleanup lock to prevent a race where
-        # _handle_sync_cleanup reads stop_next_epoch=False (before we set it),
-        # sends stop_gracefully=False, then cleanup() resets the flag — which
-        # would silently consume the stop request we are about to issue.
+        logging.warning("DEBUG_MIGRATION | finalize_migration_repartition started")
         async with self.networking_locks[MessageType.SyncCleanup]:
             if self.aria_metadata is not None:
+                logging.warning("DEBUG_MIGRATION | Setting aria_metadata.stop_in_next_epoch()")
                 self.aria_metadata.stop_in_next_epoch()
 
-        logging.warning("Sending MigrationRepartitioningDone to all workers (protocol will stop)")
+        logging.warning("DEBUG_MIGRATION | Sending MigrationRepartitioningDone to all workers (protocol will stop)")
         async with asyncio.TaskGroup() as tg:
             for worker in self._migration_workers():
-                logging.warning(f"Sending MigrationRepartitioningDone to : {worker}")
+                logging.warning(f"DEBUG_MIGRATION | Sending MigrationRepartitioningDone to : {worker}")
                 tg.create_task(
                     self.networking.send_message(
                         worker.worker_ip,
@@ -1369,11 +1451,13 @@ class CoordinatorService:
                         serializer=Serializer.NONE,
                     ),
                 )
+        logging.warning("DEBUG_MIGRATION | finalize_migration_repartition finished")
 
     async def finalize_migration(self) -> None:
+        logging.warning("DEBUG_MIGRATION | finalize_migration started")
         async with asyncio.TaskGroup() as tg:
             for worker in self._migration_workers():
-                logging.warning(f"Sending MigrationDone to : {worker}")
+                logging.warning(f"DEBUG_MIGRATION | Sending MigrationDone to : {worker}")
                 tg.create_task(
                     self.networking.send_message(
                         worker.worker_ip,
@@ -1388,6 +1472,7 @@ class CoordinatorService:
                         serializer=Serializer.MSGPACK,
                     ),
                 )
+        logging.warning("DEBUG_MIGRATION | finalize_migration finished")
 
     async def finalize_worker_sync(
         self,

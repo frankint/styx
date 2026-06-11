@@ -616,29 +616,36 @@ class AriaProtocol(BaseTransactionalProtocol):
         except asyncio.CancelledError:
             logging.warning("MIGRATION | Continuous migration sender cancelled")
             raise
+        except Exception as e:
+            logging.error(f"FATAL: Uncaught exception in _continuous_migration_sender: {e}", exc_info=True)
+            raise
 
     async def function_scheduler(self) -> None:
         await self.started.wait()
         logging.warning("STARTED function scheduler")
 
         while self.running:
-            # Wait until the ingress signals that messages are available,
-            # or a remote peer wants to proceed, instead of busy-spinning.
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    self.ingress.messages_available.wait(),
-                    timeout=0.1,
-                )
-            self.ingress.messages_available.clear()
+            try:
+                # Wait until the ingress signals that messages are available,
+                # or a remote peer wants to proceed, instead of busy-spinning.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self.ingress.messages_available.wait(),
+                        timeout=0.1,
+                    )
+                self.ingress.messages_available.clear()
 
-            async with self.sequencer.lock:
-                sequence: list[SequencedItem] = self.sequencer.get_epoch()
+                async with self.sequencer.lock:
+                    sequence: list[SequencedItem] = self.sequencer.get_epoch()
 
-                if not sequence and not self.remote_wants_to_proceed:
-                    continue
+                    if not sequence and not self.remote_wants_to_proceed:
+                        continue
 
-                self.currently_processing = True
-                await self._process_epoch(sequence)
+                    self.currently_processing = True
+                    await self._process_epoch(sequence)
+            except Exception as e:
+                logging.error(f"FATAL: Uncaught exception in function_scheduler loop: {e}", exc_info=True)
+                raise
 
         await self.stop()
 
