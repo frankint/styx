@@ -674,7 +674,7 @@ class Worker:
             if in_data:
                 should_signal = True  # batch already delivered
             elif in_remote:
-                logging.error(f"BUG CONFIRMATION | Ghost key {key} detected! `in_remote` is True, so `should_signal` is set to False. The transaction waiting on this key will now block forever!")
+                logging.error(f"MIGRATION | Ghost key {key} detected! `in_remote` is True, so `should_signal` is set to False.")
                 should_signal = False  # async in flight — batch handler will signal
             else:
                 should_signal = True  # source has nothing; treat as absent
