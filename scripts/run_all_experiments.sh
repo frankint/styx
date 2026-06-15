@@ -60,20 +60,19 @@ cleanup
 unset RIVER_P RIVER_D RIVER_Q RIVER_M
 
 
-# echo "======================================================"
-# echo " PHASE 2: NO AUTOSCALING (Chronos model)"
-# echo "======================================================"
+echo "======================================================"
+echo " PHASE 2: NO AUTOSCALING "
+echo "======================================================"
 
-# export ENABLE_AUTOSCALE=false
-# export FORECASTER_TYPE=custom_chronos
-# export FORECASTER_MAX_CONTEXT_LENGTH=1000
+export ENABLE_AUTOSCALE=false
+unset FORECASTER_TYPE
 
-# # Loop through the different static worker counts (7, 5, 4)
-# for workers in 7 5 4; do
-#     echo ">>> Running NO AUTOSCALING with INITIAL_WORKERS=$workers"
-#     export INITIAL_WORKERS=$workers
-#     $CMD_NO_AUTOSCALE
-#     cleanup
-# done
+# Loop through the different static worker counts (7, 5, 4)
+for workers in 7 5 4; do
+    echo ">>> Running NO AUTOSCALING with INITIAL_WORKERS=$workers"
+    export INITIAL_WORKERS=$workers
+    $CMD_NO_AUTOSCALE
+    cleanup
+done
 
 echo "All experiments have been successfully completed!"
