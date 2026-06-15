@@ -4,7 +4,7 @@
 # set -e
 
 # Define the two experiment commands
-CMD_AUTOSCALE="./scripts/run_autoscale_experiment.sh dhr 5000 1000000 1 0.0 1 740 results 10 400 alibaba 9"
+CMD_AUTOSCALE="./scripts/run_autoscale_experiment.sh dhr 5000 1000000 1 0.0 1 740 results 10 400 alibaba 6"
 CMD_NO_AUTOSCALE="./scripts/run_autoscale_experiment.sh dhr 5000 1000000 7 0.0 1 740 results 10 400 alibaba 0"
 
 # Helper function to stop the cluster and wait a few seconds before the next run
