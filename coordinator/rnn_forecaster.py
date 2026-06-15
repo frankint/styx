@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
+torch.set_num_threads(1)
 from sklearn.preprocessing import MinMaxScaler
 
 log = logging.getLogger("rnn_forecaster")

@@ -4,8 +4,8 @@
 # set -e
 
 # Define the two experiment commands
-CMD_AUTOSCALE="./scripts/run_autoscale_experiment.sh dhr 5000 1000000 1 0.0 1 740 results 10 400 alibaba 6"
-CMD_NO_AUTOSCALE="./scripts/run_autoscale_experiment.sh dhr 5000 1000000 1 0.0 1 740 results 10 400 alibaba 0"
+CMD_AUTOSCALE="./scripts/run_autoscale_experiment.sh dhr 5000 1000000 1 0.0 1 740 results 10 400 alibaba 9"
+CMD_NO_AUTOSCALE="./scripts/run_autoscale_experiment.sh dhr 5000 1000000 7 0.0 1 740 results 10 400 alibaba 0"
 
 # Helper function to stop the cluster and wait a few seconds before the next run
 cleanup() {
@@ -60,20 +60,20 @@ cleanup
 unset RIVER_P RIVER_D RIVER_Q RIVER_M
 
 
-echo "======================================================"
-echo " PHASE 2: NO AUTOSCALING (Chronos model)"
-echo "======================================================"
+# echo "======================================================"
+# echo " PHASE 2: NO AUTOSCALING (Chronos model)"
+# echo "======================================================"
 
-export ENABLE_AUTOSCALE=false
-export FORECASTER_TYPE=custom_chronos
-export FORECASTER_MAX_CONTEXT_LENGTH=1000
+# export ENABLE_AUTOSCALE=false
+# export FORECASTER_TYPE=custom_chronos
+# export FORECASTER_MAX_CONTEXT_LENGTH=1000
 
-# Loop through the different static worker counts (7, 5, 4)
-for workers in 7 5 4; do
-    echo ">>> Running NO AUTOSCALING with INITIAL_WORKERS=$workers"
-    export INITIAL_WORKERS=$workers
-    $CMD_NO_AUTOSCALE
-    cleanup
-done
+# # Loop through the different static worker counts (7, 5, 4)
+# for workers in 7 5 4; do
+#     echo ">>> Running NO AUTOSCALING with INITIAL_WORKERS=$workers"
+#     export INITIAL_WORKERS=$workers
+#     $CMD_NO_AUTOSCALE
+#     cleanup
+# done
 
 echo "All experiments have been successfully completed!"

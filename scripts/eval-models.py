@@ -25,14 +25,15 @@ except ImportError:
 # --- Configuration ---
 DATA_FILE = "./data/cluster_summary_1min.csv" 
 RESULTS_FILE = "experiment_results.json"
-RAW_PREDICTIONS_DIR = "./raw_predictions/"
+RAW_PREDICTIONS_DIR = "./offline-raw_predictions/"
 
 MAX_DATAPOINTS = None
 HORIZON = 10  
 
+# Reinstated full parameter grid
 PARAM_GRID = {
     'run_id': [0], 
-    'model': ['lstm', 'gru'],
+    'model': ['chronos', 'lstm', 'gru', 'river', "baseline", "no-forecasting"],
     'context_length': [10, 50, 100, 300, 600, 1000], 
     'downsample_rate': [1, 2, 5], 
     'hidden_size': [16, 32],
@@ -48,6 +49,9 @@ os.makedirs(RAW_PREDICTIONS_DIR, exist_ok=True)
 
 # --- Data Extraction & Preprocessing ---
 def load_and_preprocess_alibaba_data():
+    if not os.path.exists(DATA_FILE):
+        raise FileNotFoundError(f"Cannot find {DATA_FILE}. Please ensure the file exists.")
+        
     print(f"Loading pre-aggregated data from {DATA_FILE}...")
     aggregated_df = pd.read_csv(DATA_FILE)
     aggregated_df.rename(columns={'total_throughput': 'throughput_tps'}, inplace=True)
@@ -127,7 +131,6 @@ def forecast_chronos(pipeline, history_vals, horizon, downsample_rate=1):
     future_timestamps = [timestamps[-1] + pd.Timedelta(minutes=i+1) for i in range(downsampled_horizon)]
     future_df = pd.DataFrame({"id": "stream", "timestamp": future_timestamps})
     
-    # Request 10th, 50th (median), and 90th percentiles for an 80% Confidence Interval
     pred_df = pipeline.predict_df(
         context_df, future_df=future_df, prediction_length=downsampled_horizon,
         quantile_levels=[0.1, 0.5, 0.9], id_column="id", timestamp_column="timestamp", target="target"
@@ -188,6 +191,7 @@ def run_simulation(df, params):
     elif model_type == 'chronos' and Chronos2Pipeline:
         active_model = Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map="cpu")
     elif model_type in ['lstm', 'gru']:
+        torch.set_num_threads(1) # Kept thread optimization specifically for RNN models
         active_model = TimeSeriesRNN(
             rnn_type=model_type.upper(),
             hidden_size=params['hidden_size'],
@@ -207,7 +211,6 @@ def run_simulation(df, params):
 
         step_start = time.time()
         
-        # Default initialization
         forecasts = [val] * HORIZON
         forecasts_low = [val] * HORIZON
         forecasts_high = [val] * HORIZON
@@ -231,21 +234,15 @@ def run_simulation(df, params):
             elif model_type == 'baseline':
                 if len(history) >= 2:
                     forecasts = [np.mean(history[-min(10, len(history)):])] * HORIZON
+
+            elif model_type == 'no-forecasting':
+                if len(history) >= 1:
+                    forecasts = [history[-1]] * HORIZON
             
-            # Non-chronos models fall back to matching bounds
             forecasts_low = forecasts
             forecasts_high = forecasts
 
         step_time = time.time() - step_start
-        inference_times.append(step_time)
-        
-        ctx_len = len(history)
-        if ctx_len not in times_by_context:
-            times_by_context[ctx_len] = []
-        times_by_context[ctx_len].append(step_time)
-        
-        if len(history) == context_length:
-            full_context_inference_times.append(step_time)
 
         target_idx = i + HORIZON
         if target_idx < len(df):
@@ -303,23 +300,24 @@ def main():
         print(f"\n[!] Error during initialization: {e}")
         return
 
-    if MAX_DATAPOINTS is not None:
-        df = df.head(MAX_DATAPOINTS).reset_index(drop=True)
-
     keys, values = zip(*PARAM_GRID.items())
     experiments = [dict(zip(keys, v)) for v in itertools.product(*values)]
     
     cleaned_experiments = []
     seen = set()
     for exp in experiments:
-        # if exp['model'] == 'gru' and exp['context_length'] > 50:
-        #     continue
-            
+        # Nullify irrelevant parameters to prevent duplicate identical runs
         if exp['model'] not in ['lstm', 'gru']:
-            exp['hidden_size'], exp['num_layers'], exp['learning_rate'] = None, None, None
+            exp['hidden_size'] = None
+            exp['num_layers'] = None
+            exp['learning_rate'] = None
+            
         if exp['model'] != 'river':
-            exp['river_p'], exp['river_d'], exp['river_q'], exp['river_m'] = None, None, None, None
-        
+            exp['river_p'] = None
+            exp['river_d'] = None
+            exp['river_q'] = None
+            exp['river_m'] = None
+            
         phash = get_param_hash(exp)
         if phash not in seen:
             seen.add(phash)
@@ -335,13 +333,13 @@ def main():
         for params in tqdm(cleaned_experiments, desc="Total Progress"):
             phash = get_param_hash(params)
             if phash in completed_hashes:
+                print(f"\n[INFO] Skipping {params['model'].upper()} - Already completed in {RESULTS_FILE}.")
                 continue
 
             metrics = run_simulation(df, params)
             
             raw_filename = f"{RAW_PREDICTIONS_DIR}{params['model']}_{phash}.npy"
             
-            # Stack into a 2D array [median, lower, upper]
             stacked_preds = np.column_stack((
                 metrics['predictions'],
                 metrics['predictions_lower'],
@@ -349,7 +347,6 @@ def main():
             ))
             np.save(raw_filename, stacked_preds)
             
-            # Remove heavy lists before saving JSON
             del metrics['predictions'] 
             del metrics['predictions_lower'] 
             del metrics['predictions_upper'] 
@@ -367,10 +364,8 @@ def main():
     if results:
         summary_df = pd.json_normalize(results)
         
-        # Identify all parameter columns except the run_id
         group_cols = [col for col in summary_df.columns if col.startswith('params.') and col != 'params.run_id']
         
-        # Group by the parameters and calculate the mean for the metrics across the 10 runs
         avg_summary_df = summary_df.groupby(group_cols).agg({
             'metrics.mae': 'mean',
             'metrics.directional_accuracy': 'mean',

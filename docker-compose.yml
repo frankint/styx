@@ -10,6 +10,10 @@ services:
       - "${COORDINATOR_PORT_8000:-8000}:8000"
     volumes:
       - ./raw_predictions:/usr/local/styx/raw_predictions
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     environment:
       - KAFKA_URL=kafka1:19092
       - HEARTBEAT_LIMIT=5000
@@ -84,6 +88,10 @@ services:
       context: .
       dockerfile: worker/worker.dockerfile
     image: dev/styx-worker:latest
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     environment:
       - INGRESS_TYPE=KAFKA
       - KAFKA_URL=kafka1:19092
