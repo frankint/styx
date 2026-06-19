@@ -50,12 +50,32 @@ def render_layout(layout_type, dir_name, plot_title, is_fixed, loaded_data, scal
         rect = [0, 0, 1, 0.85] if is_fixed else [0, 0, 1, 0.80]
         title_y, legend_y = 0.98, 0.90
         title_size = 32
-        
-        # Reduced padding to eliminate whitespace between graphs
         w_pad_val = 0.5 
 
+    elif layout_type == 'vertical':
+        # --- NEW: Normal (Vertical) specific scaling ---
+        # Fonts are twice as big as the standard 2x2 sizes
+        rc_params = {
+            'font.size': 28,
+            'axes.titlesize': 32,
+            'axes.labelsize': 28,
+            'xtick.labelsize': 24,
+            'ytick.labelsize': 24,
+            'legend.fontsize': 24,
+            'lines.linewidth': 3
+        }
+        
+        w_pad_val = 2.0
+        title_size = 44  # Doubled from 22
+        
+        # Taller plots: changed from 4 * num_plots to 6 * num_plots
+        fig_size = (12, 6 * num_plots)
+        suffix = ""
+        rect = [0, 0, 1, 0.95] if is_fixed else [0, 0, 1, 0.92]
+        title_y, legend_y = 0.98, 0.945
+
     else:
-        # Standard sizes for vertical and 2x2
+        # Standard sizes reserved for 2x2 layout
         rc_params = {
             'font.size': 14,
             'axes.titlesize': 16,
@@ -69,16 +89,11 @@ def render_layout(layout_type, dir_name, plot_title, is_fixed, loaded_data, scal
         w_pad_val = 2.0
         title_size = 22
         
-        if layout_type == 'vertical':
-            fig_size = (12, 4 * num_plots)
-            suffix = ""
-            rect = [0, 0, 1, 0.95] if is_fixed else [0, 0, 1, 0.92]
-            title_y, legend_y = 0.98, 0.945
-        elif layout_type == '2x2':
-            fig_size = (16, 10)
-            suffix = "-2x2"
-            rect = [0, 0, 1, 0.93] if is_fixed else [0, 0, 1, 0.88]
-            title_y, legend_y = 0.98, 0.93
+        # 2x2 Specifics
+        fig_size = (16, 10)
+        suffix = "-2x2"
+        rect = [0, 0, 1, 0.93] if is_fixed else [0, 0, 1, 0.88]
+        title_y, legend_y = 0.98, 0.93
 
     # Apply the context so these fonts only affect this specific layout render
     with plt.rc_context(rc_params):
@@ -121,8 +136,23 @@ def render_layout(layout_type, dir_name, plot_title, is_fixed, loaded_data, scal
         for data in loaded_data:
             ax = axis_mapping[data['plot_type']]
             df = data['df']
+            
+            default_lw = plt.rcParams['lines.linewidth']
+            plot_lw = default_lw * 0.5 if data['plot_type'] == 'latency' else default_lw
+
             for col in data['value_cols']:
-                ax.plot(df['Seconds_From_Start'], df[col], label=data['clean_label'], zorder=3)
+                if data['plot_type'] == 'latency':
+                    # 1. Plot the noisy raw data faintly in the background
+                    line, = ax.plot(df['Seconds_From_Start'], df[col], alpha=0.25, linewidth=plot_lw*0.5, zorder=2)
+                    base_color = line.get_color()
+                    
+                    # 2. Calculate a 15-period rolling average to smooth the trend
+                    smoothed_data = df[col].rolling(window=15, min_periods=1).mean()
+                    
+                    # 3. Plot the bold smoothed line on top
+                    ax.plot(df['Seconds_From_Start'], smoothed_data, label=f"{data['clean_label']} (Smoothed)", color=base_color, linewidth=default_lw, zorder=3)
+                else:
+                    ax.plot(df['Seconds_From_Start'], df[col], label=data['clean_label'], linewidth=plot_lw, zorder=3)
 
         for i, ax in enumerate(axes_list):
             if is_fixed and layout_type == '2x2' and i == 3:
@@ -180,7 +210,7 @@ def process_directory(directory_path):
         "Consumption_Rate_0.csv":    {"label": "Input Rate", "plot_type": "throughput"},
         "TPS_committed_0.csv":       {"label": "Output TPS", "plot_type": "throughput"},
         "backlog.csv":               {"label": "Queue Backlog", "plot_type": "backlog"},
-        "Transaction_Latency_0.csv": {"label": "Avg Latency", "plot_type": "latency"}
+        "Transaction_Latency_0.csv": {"label": "latency", "plot_type": "latency"}
     }
     if not is_fixed:
         TARGET_FILES_MAP["num_workers.csv"] = {"label": "Live Workers", "plot_type": "workers"}
@@ -251,8 +281,9 @@ def process_directory(directory_path):
         avg_val = df[val_col].mean()
         max_val = df[val_col].max()
 
-        if label == "Avg Latency":
-            print(f"  - Average Latency: {avg_val:.2f} ms (Max: {max_val:.2f} ms)")
+        if label == "latency":
+            p50_val = df[val_col].median()
+            print(f"  - p50 Latency: {p50_val:.2f} ms (Max: {max_val:.2f} ms)")
         elif label == "Queue Backlog":
             total_backlog = df[val_col].sum()
             print(f"  - Total Backlog: {total_backlog:.0f} messages (Avg: {avg_val:.2f}, Max: {max_val:.0f})")

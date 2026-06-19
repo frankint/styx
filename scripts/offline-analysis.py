@@ -107,7 +107,10 @@ def plot_global_comparison(results_df, truth_df):
 
         models_err = best_by_err['model'].str.upper().tolist()
         errs = best_by_err['error_percentage'].tolist()
-        lats = best_by_err['latency_sec'].tolist()
+        
+        # --- CONVERT LATENCY TO MILLISECONDS ---
+        lats_ms = (best_by_err['latency_sec'] * 1000).tolist()
+        
         x1 = np.arange(len(models_err))
 
         # --- PLOT METRICS ---
@@ -119,8 +122,10 @@ def plot_global_comparison(results_df, truth_df):
         ax1.set_xticklabels(models_err, fontweight='bold', rotation=10, ha='right', rotation_mode='anchor')
 
         ax1_lat = ax1.twinx()
-        ax1_lat.bar(x1 + width/2, lats, width, label='Latency', color='#0173B2', alpha=0.85)
-        ax1_lat.set_ylabel('Latency (s)', color='#0173B2', fontweight='bold')
+        
+        # --- UPDATED LABELS TO MILLISECONDS ---
+        ax1_lat.bar(x1 + width/2, lats_ms, width, label='Latency (ms)', color='#0173B2', alpha=0.85)
+        ax1_lat.set_ylabel('Latency (ms)', color='#0173B2', fontweight='bold')
         ax1_lat.tick_params(axis='y', labelcolor='#0173B2')
         
         plt.title('Best Configuration per Model (Ranked by Error %)', fontweight='bold')
@@ -175,7 +180,9 @@ def plot_per_model_comparisons(results_df):
             labels.append(lbl.strip())
             
         maes = model_data['mae'].tolist()
-        latencies = model_data['latency_sec'].tolist()
+        
+        # Optional: Converting this plot to ms as well for consistency
+        latencies_ms = (model_data['latency_sec'] * 1000).tolist()
 
         fig, ax1 = plt.subplots(figsize=(max(10, len(labels) * 1.0), 6))
         x = np.arange(len(labels))
@@ -188,8 +195,8 @@ def plot_per_model_comparisons(results_df):
         ax1.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
         
         ax1_lat = ax1.twinx()
-        ax1_lat.bar(x + width/2, latencies, width, color='tab:blue', alpha=0.7)
-        ax1_lat.set_ylabel('Latency (s)', color='tab:blue')
+        ax1_lat.bar(x + width/2, latencies_ms, width, color='tab:blue', alpha=0.7)
+        ax1_lat.set_ylabel('Latency (ms)', color='tab:blue')
         
         plt.title(f'Intra-Model Tuning: {model_name.upper()} Parameters (Top 10)', fontsize=16, fontweight='bold')
 
@@ -201,7 +208,7 @@ def plot_per_model_comparisons(results_df):
         if SHOW_INTERACTIVE_POPUPS: plt.show() 
         plt.close()
 
-def plot_context_time_evolution(results_df):
+def plot_context_time_evolution(results_df, base_font_size=20):
     valid_data = results_df.dropna(subset=['mae']).copy()
     if valid_data.empty:
         return
@@ -210,15 +217,15 @@ def plot_context_time_evolution(results_df):
     sorted_data = valid_data.sort_values(by=['context_num', 'mae'], ascending=[False, True])
     longest_ctx_by_model = sorted_data.drop_duplicates(subset=['model'])
 
-    # --- UPDATED: Font and Style Config for Two-Column Paper ---
+    # --- UPDATED: Variable-driven Font and Style Config ---
     rc_params = {
-        'font.size': 16,           # Increased base font size
-        'axes.titlesize': 18,      # Increased title size
-        'axes.labelsize': 16,      # Increased axis label size
-        'xtick.labelsize': 14,
-        'ytick.labelsize': 14,
-        'legend.fontsize': 14,
-        'lines.linewidth': 3.5     # Thickened lines for scaled-down visibility
+        'font.size': base_font_size,                   # Base font size
+        'axes.titlesize': base_font_size + 4,          # Title size
+        'axes.labelsize': base_font_size + 2,          # Axis label size
+        'xtick.labelsize': base_font_size - 2,         # X-tick size
+        'ytick.labelsize': base_font_size - 2,         # Y-tick size
+        'legend.fontsize': base_font_size - 2,         # Legend size
+        'lines.linewidth': 3.5                         # Thickened lines for scaled-down visibility
     }
 
     # Colorblind-friendly hex palette
@@ -246,52 +253,43 @@ def plot_context_time_evolution(results_df):
                 continue
 
             x = np.array([item[0] for item in sorted_items])
-            y = np.array([item[1] for item in sorted_items])
+            # MULTIPLY BY 1000 FOR MILLISECONDS
+            y = np.array([item[1] * 1000 for item in sorted_items])
 
             # Get color from palette, fallback to gray
             line_color = cb_colors.get(model, '#7f7f7f')
 
-            # --- PLOT RAW DATA ---
+            # --- PLOT LINE ---
             plt.plot(x, y, 
                      color=line_color,
                      linestyle='-', 
-                     alpha=0.4, # Lowered alpha so the raw data sits in the background
-                     label=f"{model} Raw (Max Ctx: {row['context_length']})")
-
-            # --- CALCULATE AND PLOT TRENDLINE ---
-            # Fit a 1st-degree polynomial (linear trendline: y = mx + c)
-            coefficients = np.polyfit(x, y, 1)
-            trend_function = np.poly1d(coefficients)
-            y_trend = trend_function(x)
-
-            # Plot the trendline
-            plt.plot(x, y_trend, 
-                     color=line_color,
-                     linestyle='--', # Dashed line to indicate it's a trend
-                     linewidth=3.5,  # Matches the rc_params thickness
-                     alpha=1.0,      # Full opacity for visibility
-                     label=f"{model} Trend")
+                     alpha=0.85, 
+                     label=f"{model} (Max Ctx: {row['context_length']})")
 
         plt.title('Average Inference Time vs. Current Context Size', fontweight='bold')
         plt.xlabel('Current Context Size (Datapoints)')
-        plt.ylabel('Inference Time per Step (Seconds)')
+        
+        # UPDATED Y-LABEL TO MILLISECONDS
+        plt.ylabel('Inference Time per Step (ms)')
         
         # Reverted to default linear scale
         plt.yscale('linear')
 
-        # Adding legend and standard grid
-        plt.legend()
+        # --- EXPLICIT LEGEND PLACEMENT ---
+        # Added loc='upper left' to lock it in place
+        plt.legend(loc='upper left')
+        
         plt.grid(True, linestyle='-', alpha=0.3) 
         plt.tight_layout()
         
-        # Make sure PLOTS_DIR and SHOW_INTERACTIVE_POPUPS are accessible in your scope
+        # Assuming PLOTS_DIR and SHOW_INTERACTIVE_POPUPS are defined globally
         plot_path = os.path.join(PLOTS_DIR, '02_context_time_evolution.png')
         plt.savefig(plot_path, dpi=300)
         
         if SHOW_INTERACTIVE_POPUPS: plt.show()
         plt.close()
 
-def plot_time_series_overlays(truth_df, results_df):
+def plot_time_series_overlays(truth_df, results_df, base_font_size=28):
     split_idx = int(len(truth_df) * 0.66)
     time_axis = np.arange(len(truth_df)) 
     
@@ -309,14 +307,14 @@ def plot_time_series_overlays(truth_df, results_df):
         except (ValueError, TypeError):
             return str(val)
 
-    # --- MASSIVE FONT SCALING FOR PAPER PRESENTATION ---
+    # --- UPDATED: Variable-driven Font Scaling for Paper Presentation ---
     rc_params = {
-        'font.size': 24,           # Base font size pushed to 24
-        'axes.titlesize': 30,      # Massive titles
-        'axes.labelsize': 26,      # Axis labels pushed to 26
-        'xtick.labelsize': 22,     # Tick marks pushed to 22
-        'ytick.labelsize': 22,
-        'legend.fontsize': 20      # Legend pushed to 20
+        'font.size': base_font_size,                   # Base font size
+        'axes.titlesize': base_font_size + 6,          # Massive titles
+        'axes.labelsize': base_font_size + 2,          # Axis labels
+        'xtick.labelsize': base_font_size - 2,         # Tick marks
+        'ytick.labelsize': base_font_size - 2,         # Tick marks
+        'legend.fontsize': base_font_size - 4          # Legend
     }
 
     with plt.rc_context(rc_params):
@@ -366,16 +364,20 @@ def plot_time_series_overlays(truth_df, results_df):
                     
                 # --- NEW: Calculate Relative Error percentage for this specific row ---
                 rel_error = (row['mae'] / mean_actual_tps) * 100 if mean_actual_tps else np.nan
+                
+                # CONVERT LATENCY TO MILLISECONDS
+                latency_ms = row['latency_sec'] * 1000 if pd.notna(row['latency_sec']) else np.nan
 
                 # --- UPDATED: Swapped raw MAE for Rel. Error %, Removed Dir. Acc. ---
                 param_text += (
                     f"--- ML Metrics ---\n"
                     f"Rel. Error: {safe_fmt(rel_error, '.1f', '%')}\n"
-                    f"Latency: {safe_fmt(row['latency_sec'], '.4f', 's')}"
+                    # UPDATED STRING TO USE MILLISECONDS (with 1 decimal point to be clean)
+                    f"Latency: {safe_fmt(latency_ms, '.1f', 'ms')}"
                 )
                 
-                # Text box maintained at size 22
-                plt.text(0.02, 0.95, param_text, transform=plt.gca().transAxes, fontsize=22,
+                # Text box dynamically scales with base_font_size
+                plt.text(0.02, 0.95, param_text, transform=plt.gca().transAxes, fontsize=base_font_size - 2,
                          verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.9), zorder=10)
                 
                 plt.title(f"{model_display_name} Top 10 | Rank #{rank} Overlay", fontweight='bold')
@@ -385,6 +387,7 @@ def plot_time_series_overlays(truth_df, results_df):
                 plt.grid(True, alpha=0.3)
                 plt.tight_layout()
                 
+                # Assuming PLOTS_DIR and SHOW_INTERACTIVE_POPUPS are defined globally
                 plot_path = os.path.join(PLOTS_DIR, f'03_{model_name.lower()}_rank_{rank:02d}_overlay.png')
                 plt.savefig(plot_path, dpi=300)
                 
@@ -407,9 +410,11 @@ def main():
     
     display_df['mae'] = pd.to_numeric(display_df['mae'], errors='coerce').round(3)
     display_df['dir_acc'] = (pd.to_numeric(display_df['directional_accuracy'], errors='coerce') * 100).round(1).astype(str) + '%'
-    display_df['latency_sec'] = pd.to_numeric(display_df['latency_sec'], errors='coerce').round(4)
     
-    cols_to_show = ['model', 'context_length', 'downsample_rate', 'hidden_size', 'river_p', 'mae', 'dir_acc', 'latency_sec']
+    # Output terminal data in MS as well for consistency
+    display_df['latency_ms'] = (pd.to_numeric(display_df['latency_sec'], errors='coerce') * 1000).round(2)
+    
+    cols_to_show = ['model', 'context_length', 'downsample_rate', 'hidden_size', 'river_p', 'mae', 'dir_acc', 'latency_ms']
     print(display_df[cols_to_show].head(10).to_string(index=False))
     print("="*95 + "\n")
 
@@ -423,7 +428,7 @@ def main():
     print("Generating Analytical Plots...")
     
     plot_global_comparison(results_df, truth_df)
-    plot_per_model_comparisons(results_df)
+    plot_per_model_comparisons(results_df) # This one is also in ms now!
     plot_context_time_evolution(results_df)
     plot_time_series_overlays(truth_df, results_df)
     

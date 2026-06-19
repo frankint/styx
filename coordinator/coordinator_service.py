@@ -1423,18 +1423,13 @@ class CoordinatorService:
                     writer.close()
                     await writer.wait_closed()
 
-            try:
-                server = await asyncio.start_server(
-                    request_handler,
-                    sock=self.coor_socket,
-                    limit=2**32,
-                )
-                async with server:
-                    await server.serve_forever()
-            except Exception as e:
-                logging.error(f"Coordinator TCP Service crashed: {e}")
-                logging.warning(f"Coordinator TCP Service crashed: {e}", exc_info=True)
-                raise
+            server = await asyncio.start_server(
+                request_handler,
+                sock=self.coor_socket,
+                limit=2**32,
+            )
+            async with server:
+                await server.serve_forever()
 
     async def finalize_migration_repartition(self) -> None:
         logging.warning("DEBUG_MIGRATION | finalize_migration_repartition started")

@@ -674,7 +674,7 @@ class Worker:
             if in_data:
                 should_signal = True  # batch already delivered
             elif in_remote:
-                logging.error(f"MIGRATION | Ghost key {key} detected! `in_remote` is True, so `should_signal` is set to False.")
+                logging.error(f"BUG CONFIRMATION | Ghost key {key} detected! `in_remote` is True, so `should_signal` is set to False. The transaction waiting on this key will now block forever!")
                 should_signal = False  # async in flight — batch handler will signal
             else:
                 should_signal = True  # source has nothing; treat as absent
@@ -1068,10 +1068,6 @@ class Worker:
             )
             async with server:
                 await server.serve_forever()
-        except Exception as e:
-            logging.error(f"Worker TCP Service crashed: {e}")
-            logging.warning(f"Worker TCP Service crashed: {e}", exc_info=True)
-            raise
         finally:
             self.pool.shutdown(wait=False, cancel_futures=True)
 
@@ -1099,18 +1095,13 @@ class Worker:
                 await writer.wait_closed()
 
         logging.warning("Starting Protocol TCP Service")
-        try:
-            server = await asyncio.start_server(
-                request_handler,
-                sock=self.protocol_socket,
-                limit=2**32,
-            )
-            async with server:
-                await server.serve_forever()
-        except Exception as e:
-            logging.error(f"Worker Protocol TCP Service crashed: {e}")
-            logging.warning(f"Worker Protocol TCP Service crashed: {e}", exc_info=True)
-            raise
+        server = await asyncio.start_server(
+            request_handler,
+            sock=self.protocol_socket,
+            limit=2**32,
+        )
+        async with server:
+            await server.serve_forever()
 
     async def register_to_coordinator(self, standby: bool) -> None:
         """
@@ -1238,12 +1229,7 @@ class Worker:
 
             # Start TCP services
             self.protocol_task = asyncio.create_task(self.start_protocol_tcp_service())
-            try:
-                await self.start_tcp_service()
-            except Exception as e:
-                logging.error(f"Fatal error in Worker start_tcp_service: {e}")
-                logging.warning(f"Fatal error in Worker start_tcp_service: {e}", exc_info=True)
-                raise
+            await self.start_tcp_service()
 
             self.heartbeat_proc.join()
             self.async_snapshotting_proc.join()
