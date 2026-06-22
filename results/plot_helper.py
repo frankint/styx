@@ -89,10 +89,19 @@ def main() -> None:
         nargs="+",
         help="Keywords to match run directories (e.g. ycsb, tpcc, dmr, dhr)",
     )
+    parser.add_argument(
+        "-c", "--combined-name",
+        type=str,
+        default=None,
+        help="Name of the combined plot",
+    )
     args = parser.parse_args()
 
     runs = find_runs_by_keyword(args.workload)
-    output_name = f"combined_{_output_basename(args.workload)}.pdf"
+    if args.combined_name:
+        output_name = f"{args.combined_name}.pdf"
+    else:
+        output_name = f"combined_{_output_basename(args.workload)}.pdf"
 
     while True:
         selected = interactive_select(runs)
@@ -105,7 +114,8 @@ def main() -> None:
             4,
             1,
             sharex=True,
-            figsize=(16, 20),
+            figsize=(16, 16),
+            gridspec_kw={"height_ratios": [3, 3, 2, 2]},
         )
         plot_throughput(
             selected,

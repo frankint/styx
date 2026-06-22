@@ -136,6 +136,12 @@ class Worker:
         self.worker_operators: dict[OperatorPartition, Operator] | None = None
 
         self.migration_completed: asyncio.Event = asyncio.Event()
+        # Set when the coordinator confirms ALL participating workers have
+        # rebuilt their runtime post-migration. Gates the start of epoch
+        # processing so no worker runs the new epoch (and exchanges barrier
+        # messages) while peers are still rebuilding — which previously let a
+        # fast worker race ahead and desynchronize the Aria barriers.
+        self.migration_ready_to_start: asyncio.Event = asyncio.Event()
         self._migration_task: asyncio.Task | None = None
 
         self.m_input_offsets: dict[OperatorPartition, int] = {}
@@ -154,6 +160,8 @@ class Worker:
         self._pending_hash_metadata: dict[OperatorPartition, dict[Any, tuple[int, int]]] = defaultdict(dict)
         self._pending_migration_data: bytes | None = None
         self.migration_error: BaseException | None = None
+
+        self._buffered_async_migration: list[bytes] = []
 
         # Bounded queues for backpressure
         # - protocol_queue: for protocol TCP messages
@@ -177,6 +185,7 @@ class Worker:
             MessageType.ReceiveRemoteKey: self._handle_receive_remote_key,
             MessageType.MigrationRepartitioningDone: self._handle_migration_repartitioning_done,
             MessageType.MigrationDone: self._handle_migration_done,
+            MessageType.MigrationReadyToStart: self._handle_migration_ready_to_start,
             MessageType.InitRecovery: self._handle_init_recovery,
             MessageType.ReadyAfterRecovery: self._handle_ready_after_recovery,
         }
@@ -667,7 +676,6 @@ class Worker:
             self.local_state.set_data_from_migration(operator_partition, key, value)
             should_signal = True
         else:
-            logging.warning(f"MIGRATION | ReceiveRemoteKey received None for {operator_partition} {key}")
             op_name, partition = operator_partition
             in_data = op in self.local_state.data and key in self.local_state.data[op]
             in_remote = self.local_state.in_remote_keys(key, op_name, partition)
@@ -678,6 +686,12 @@ class Worker:
                 should_signal = False  # async in flight — batch handler will signal
             else:
                 should_signal = True  # source has nothing; treat as absent
+            remote_info = self.local_state.get_worker_id_old_partition(op_name, partition, key)
+            logging.debug(
+                f"MIGRATION | ReceiveRemoteKey received None | worker={self.id}"
+                f" {operator_partition} key={key} in_data={in_data} in_remote={in_remote}"
+                f" will_signal={should_signal} remote_info={remote_info}",
+            )
 
         if should_signal and (
             op in self.protocol_networking.wait_remote_key_event
@@ -769,16 +783,42 @@ class Worker:
                 f"MIGRATION | PHASE B Runtime rebuilt | took: {t_deploy_end - t_deploy_start}",
             )
 
-            # 9. Start protocol with background migration.
-            # If this worker ended up with no partitions (scale-down victim),
-            # start() will skip the function_scheduler but migration sender still runs
+            # 8b. Replay any AsyncMigration batches that arrived while this
+            # worker had no protocol service (would otherwise be lost).
+            await self._drain_buffered_async_migration()
+
+            # 9. Start protocol (background migration). Scale-down victims skip the
+            # function_scheduler; migration sender still runs. start() launches
+            # migration/comm tasks immediately, but the scheduler blocks on
+            # protocol.started until the cross-worker barrier below.
             self.function_execution_protocol.start()
-            self.function_execution_protocol.started.set()
             if not self.registered_operators:
                 logging.warning(f"Worker {self.id}: this worker is now standby")
 
+            # 9b. Ready barrier: signal rebuild complete, wait for all peers.
+            # Prevents epoch / Aria barrier exchange while any worker is still rebuilding.
+            t_ready_start = timer()
+            await self.networking.send_message(
+                DISCOVERY_HOST,
+                DISCOVERY_PORT,
+                msg=(self.id,),
+                msg_type=MessageType.MigrationReadyToStart,
+                serializer=Serializer.MSGPACK,
+            )
+            logging.warning("MIGRATION | PHASE B WAITING FOR all workers ready")
+            await self.migration_ready_to_start.wait()
+            t_ready_end = timer()
+            logging.warning(
+                f"MIGRATION | PHASE B all workers ready | waited: {t_ready_end - t_ready_start}",
+            )
+
+            # Peers aligned: clear stale per-epoch sync events, release scheduler.
+            self.function_execution_protocol.reset_sync_barriers()
+            self.function_execution_protocol.started.set()
+
             # Reset sync events for next time
             self.migration_completed.clear()
+            self.migration_ready_to_start.clear()
 
             phase_b_end = timer()
             logging.warning(
@@ -787,6 +827,19 @@ class Worker:
         except Exception as e:
             logging.error(f"Uncaught exception during migration Phase B: {e}")
             logging.warning(f"DEBUG_WORKER | Uncaught exception during migration Phase B: {e}", exc_info=True)
+
+    async def _drain_buffered_async_migration(self) -> None:
+        """Replay AsyncMigration batches that were buffered while the protocol
+        service did not exist yet"""
+        if not self._buffered_async_migration:
+            return
+        buffered = self._buffered_async_migration
+        self._buffered_async_migration = []
+        logging.warning(
+            f"MIGRATION | Replaying {len(buffered)} AsyncMigration batch(es) buffered during protocol restart",
+        )
+        for message in buffered:
+            await self.function_execution_protocol._handle_async_migration(message)
 
     async def _handle_migration_done(self, data: bytes, _: MessageType) -> None:
         (
@@ -797,6 +850,12 @@ class Worker:
         ) = self.networking.decode_message(data)
         logging.warning("MIGRATION REPARTITIONING DONE RECEIVED")
         self.migration_completed.set()
+        await asyncio.sleep(0)
+
+    async def _handle_migration_ready_to_start(self, _data: bytes, _: MessageType) -> None:
+        # Coordinator confirms all participating workers finished rebuilding.
+        # Phase B (step 9b) is waiting on this before releasing the scheduler.
+        self.migration_ready_to_start.set()
         await asyncio.sleep(0)
 
     async def _handle_init_recovery(self, data: bytes, _: MessageType) -> None:
@@ -1021,9 +1080,15 @@ class Worker:
                             pass
                 else:
                     msg_type = self.protocol_networking.get_msg_type(message)
-                    logging.debug(
-                        f"Dropped message_type: {msg_type} due to protocol service restart (expected behaviour)",
-                    )
+                    if msg_type == MessageType.AsyncMigration:
+                        # Protocol service is mid-rebuild (newly activated standby).
+                        # Migration data cannot be lost: buffer it and replay once
+                        # the protocol exists (see _drain_buffered_async_migration in Phase B).
+                        self._buffered_async_migration.append(message)
+                    else:
+                        logging.debug(
+                            f"Dropped message_type: {msg_type} due to protocol service restart (expected behaviour)",
+                        )
             except Exception as e:
                 logging.exception(f"Error while processing protocol message: {e}")
                 if SUPER_VERBOSE:

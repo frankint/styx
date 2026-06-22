@@ -66,6 +66,23 @@ class TestSocketPool:
         assert next(pool) is c3
         assert next(pool) is c1  # wraps around
 
+    def test_partial_pool_does_not_index_out_of_range(self):
+        # Pool configured for 16 but only 4 connections succeeded — must not
+        # use self.size when picking the next socket.
+        pool = SocketPool("localhost", 8080, size=16)
+        conns = [StyxSocketClient() for _ in range(4)]
+        pool.conns = conns
+        pool.index = 5  # stale index from a full-size round-robin
+
+        for _ in range(20):
+            picked = next(pool)
+            assert picked in conns
+
+    def test_empty_pool_raises_connection_error(self):
+        pool = SocketPool("localhost", 8080, size=4)
+        with pytest.raises(ConnectionError, match="No connections available"):
+            next(pool)
+
     def test_iter_returns_self(self):
         pool = SocketPool("localhost", 8080)
         assert iter(pool) is pool

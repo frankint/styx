@@ -208,17 +208,19 @@ class SocketPool:
         # ring and return the least-loaded connection. Falls back to pure
         # round-robin when all conns are equally loaded (typical idle state).
         # Early-exits at in_flight == 0 to keep this cheap on the hot path.
-        n_conns = len(self.conns)
-        if self.index >= n_conns:
-            self.index = 0
+        n = len(self.conns)
+        if n == 0:
+            msg = f"No connections available in pool for {self.host}:{self.port}"
+            raise ConnectionError(msg)
+
+        if self.index >= n:
+            self.index %= n
 
         best_idx = self.index
         best_load = self.conns[best_idx].in_flight
-        if best_load != 0:
-            for offset in range(1, n_conns):
-                idx = self.index + offset
-                if idx >= n_conns:
-                    idx -= n_conns
+        if best_load != 0 and n > 1:
+            for offset in range(1, n):
+                idx = (self.index + offset) % n
                 load = self.conns[idx].in_flight
                 if load < best_load:
                     best_idx = idx
@@ -226,7 +228,7 @@ class SocketPool:
                     if load == 0:
                         break
         next_start = best_idx + 1
-        self.index = 0 if next_start >= n_conns else next_start
+        self.index = 0 if next_start == n else next_start
         return self.conns[best_idx]
 
     async def create_socket_connections(self) -> None:
@@ -334,8 +336,12 @@ class NetworkingManager(BaseNetworking):
         """Idempotent. Builds the pool fully before publishing to self.pools so
         concurrent callers never see a half-initialised pool."""
         async with self._pool_creation_lock:
-            if (host, port) in self.pools:
+            existing = self.pools.get((host, port))
+            if existing is not None and existing.conns:
                 return
+            if existing is not None:
+                await existing.close()
+                del self.pools[(host, port)]
             pool = SocketPool(
                 host,
                 port,
@@ -360,7 +366,7 @@ class NetworkingManager(BaseNetworking):
         # Hot path: lock-free. dict.get and __next__ have no await points, so
         # asyncio's cooperative scheduling makes them atomic.
         pool = self.pools.get((host, port))
-        if pool is None:
+        if pool is None or not pool.conns:
             await self.create_socket_connection(host, port)
             pool = self.pools[(host, port)]
         socket_conn = next(pool)
@@ -468,7 +474,7 @@ class NetworkingManager(BaseNetworking):
     ) -> object:
         msg = self.encode_message(msg=msg, msg_type=msg_type, serializer=serializer)
         pool = self.pools.get((host, port))
-        if pool is None:
+        if pool is None or not pool.conns:
             await self.create_socket_connection(host, port)
             pool = self.pools[(host, port)]
         socket_conn = next(pool)

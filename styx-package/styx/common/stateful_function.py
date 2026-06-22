@@ -124,9 +124,12 @@ class StatefulFunction(Function):
             if need_remote_fetch:
                 if remote_info is None:
                     logging.warning("Remote fetch failed: remote_info is None")
-                # logging.warning(
-                #    f"TID={self.__t_id} waiting for key={self.__key} op={self.__operator_name} part={self.__partition}"
-                # )
+                else:
+                    logging.debug(
+                        f"MIGRATION | Remote key fetch start | worker={self.__networking.worker_id}"
+                        f" t_id={self.__t_id} op={self.__operator_name} part={self.__partition}"
+                        f" key={self.__key} remote_info={remote_info}",
+                    )
                 await self.__networking.request_key(
                     self.__operator_name,
                     self.__partition,
@@ -138,9 +141,6 @@ class StatefulFunction(Function):
                     self.__partition,
                     self.__key,
                 )
-                # logging.warning(
-                #    f"TID={self.__t_id} received key={self.__key} op={self.__operator_name} part={self.__partition}"
-                # )
             # 3) Run user logic while holding the operator lock.
             # logging.warning(f"Running user logic for {self.__operator_name}:{self.__key}")
             async with self.__operator_lock:
