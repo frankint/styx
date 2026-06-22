@@ -315,5 +315,5 @@ def batch_process_experiments(base_directory):
         process_directory(directory)
 
 if __name__ == "__main__":
-    BASE_TARGET_DIR = "./grafana_data" 
+    BASE_TARGET_DIR = "./results" 
     batch_process_experiments(BASE_TARGET_DIR)
