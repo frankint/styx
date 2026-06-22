@@ -1,7 +1,7 @@
 import random
 import math
 from abc import ABC, abstractmethod
-
+import csv
 
 class LoadGenerator(ABC):
     def __init__(self, time: int, max_threshold: int | None = None):
@@ -12,6 +12,38 @@ class LoadGenerator(ABC):
     def generate(self) -> list[int]:
         pass
 
+
+class AlibabaDataLoadGenerator(LoadGenerator):
+    def __init__(self, target_tps: int, min_tps: int, max_tps: int, time: int, 
+                 csv_path: str = "data/cluster_summary.csv", max_threshold: int | None = None, **kwargs):
+        super().__init__(time, max_threshold)
+        self.csv_path = csv_path
+        self.min_tps = min_tps
+        self.max_tps = target_tps # SETTING MAX TO TARGET TPS FOR NOW
+
+    def generate(self) -> list[int]:
+        values = []
+
+        with open(self.csv_path, mode = 'r', encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader, None)
+
+            for i, row in enumerate(reader):
+                if i >= self.time:
+                    break
+                raw_value = float(row[1])
+                value = self.min_tps + (raw_value * (self.max_tps-self.min_tps))
+                if self.max_threshold is not None and value > self.max_threshold:
+                    value = self.max_threshold
+                values.append(value)
+        
+        if not values:
+            return [self.min_tps] * self.time
+        
+        while len(values) < self.time:
+            values.append(values[-1])
+
+        return [abs(int(val)) for val in values]
 
 class RandomLoadGenerator(LoadGenerator):
     def __init__(self, target_tps: int, time: int, magnitude: int, max_threshold: int | None = None, seed: int | None = None):
@@ -136,6 +168,7 @@ class LoadSchedule:
         "cosine": CosineLoadGenerator,
         "step": StepPatternLoadGenerator,
         "random": RandomLoadGenerator,
+        "alibaba": AlibabaDataLoadGenerator,
     }
     
     def __init__(self, values: list[int], step_size: int):

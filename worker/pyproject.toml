@@ -6,6 +6,7 @@ dependencies = [
     "aiokafka==0.13.0",
     "cityhash==0.4.10",
     "cloudpickle==3.1.2",
+    "Cython==3.2.4",
     "geopy>=2.4.1",
     "minio==7.2.20",
     "msgspec==0.20.0",

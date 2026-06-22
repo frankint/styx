@@ -4,9 +4,12 @@ services:
       context: .
       dockerfile: coordinator/coordinator.dockerfile
     image: dev/styx-coordinator:latest
+    user: "root"
     ports:
-      - "8886:8888"
-      - "8000:8000"
+      - "${COORDINATOR_PORT_8886:-8886}:8888"
+      - "${COORDINATOR_PORT_8000:-8000}:8000"
+    volumes:
+      - ./raw_predictions:/usr/local/styx/raw_predictions
     environment:
       - KAFKA_URL=kafka1:19092
       - HEARTBEAT_LIMIT=5000
@@ -15,6 +18,39 @@ services:
       - S3_ENDPOINT=http://rustfs:9000
       - S3_ACCESS_KEY=rustfsadmin
       - S3_SECRET_KEY=rustfsadmin
+      - FORECASTER_TYPE=${FORECASTER_TYPE:-custom_chronos}
+      - FORECASTER_MAX_CONTEXT_LENGTH=${FORECASTER_MAX_CONTEXT_LENGTH:-1000}
+      - DOWNSAMPLE_RATE=${DOWNSAMPLE_RATE:-1}
+      - RNN_HIDDEN_SIZE=${RNN_HIDDEN_SIZE:-32}
+      - RNN_NUM_LAYERS=${RNN_NUM_LAYERS:-1}
+      - RNN_LEARNING_RATE=${RNN_LEARNING_RATE:-0.01}
+      - RIVER_P=${RIVER_P:-5}
+      - RIVER_D=${RIVER_D:-0}
+      - RIVER_Q=${RIVER_Q:-0}
+      - RIVER_M=${RIVER_M:-30}
+      # chronos
+      # - FORECASTER_TYPE=custom_chronos
+      # - FORECASTER_MAX_CONTEXT_LENGTH=1000
+      # lstm
+      # - FORECASTER_TYPE=lstm
+      # - FORECASTER_MAX_CONTEXT_LENGTH=300
+      # - RNN_HIDDEN_SIZE=32
+      # - RNN_NUM_LAYERS=1
+      # - RNN_LEARNING_RATE=0.01
+      # - DOWNSAMPLE_RATE=2
+      # gru
+      # - FORECASTER_TYPE=gru
+      # - FORECASTER_MAX_CONTEXT_LENGTH=600
+      # - RNN_HIDDEN_SIZE=16
+      # - RNN_NUM_LAYERS=2
+      # - RNN_LEARNING_RATE=0.01
+      # - DOWNSAMPLE_RATE=5
+      # river
+      # - FORECASTER_TYPE=river
+      # - RIVER_P=5
+      # - RIVER_D=1
+      # - RIVER_Q=2
+      # - RIVER_M=30
     depends_on:
       - prometheus
       - grafana
@@ -22,9 +58,10 @@ services:
   prometheus:
     image: prom/prometheus:v3.2.1
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      # - ./prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=365d"
@@ -33,7 +70,7 @@ services:
   grafana:
     image: grafana/grafana:11.5.2-ubuntu
     ports:
-      - "3001:3000"
+      - "${GRAFANA_PORT:-3001}:3000"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin

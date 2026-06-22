@@ -107,8 +107,8 @@ class StyxSocketClient:
                 while i < self.n_retries:
                     try:
                         self.writer.write(message)
-                        await self.writer.drain()
-                    except OSError, RuntimeError, ConnectionResetError, BrokenPipeError:
+                        await asyncio.wait_for(self.writer.drain(), timeout=3.0)
+                    except (OSError, RuntimeError, ConnectionResetError, BrokenPipeError, TimeoutError, asyncio.TimeoutError):
                         logging.warning(
                             f"Broken connection in rq-rs, close the old ones and retry. "
                             f"Attempt {i} at {self.target_host}:{self.target_port}",
@@ -142,10 +142,10 @@ class StyxSocketClient:
                 while i < self.n_retries:
                     try:
                         self.writer.write(message)
-                        await self.writer.drain()
-                        (size,) = unpack(">Q", await self.reader.readexactly(8))
-                        resp = await self.reader.readexactly(size)
-                    except OSError, RuntimeError, ConnectionResetError, BrokenPipeError:
+                        await asyncio.wait_for(self.writer.drain(), timeout=3.0)
+                        (size,) = unpack(">Q", await asyncio.wait_for(self.reader.readexactly(8), timeout=5.0))
+                        resp = await asyncio.wait_for(self.reader.readexactly(size), timeout=10.0)
+                    except (OSError, RuntimeError, ConnectionResetError, BrokenPipeError, TimeoutError, asyncio.TimeoutError):
                         logging.warning(
                             f"Broken connection in rq-rs, close the old ones and retry. "
                             f"Attempt {i} at {self.target_host}:{self.target_port}",
@@ -173,7 +173,7 @@ class StyxSocketClient:
             if self.writer is not None:
                 self.writer.close()
                 await self.writer.wait_closed()
-        except ConnectionResetError, BrokenPipeError:
+        except (ConnectionResetError, BrokenPipeError):
             logging.warning(
                 f"Worker failure detected {self.target_host}:{self.target_port} "
                 f"[Connection reset by peer] Recovery will be automatically initiated.",
@@ -208,13 +208,17 @@ class SocketPool:
         # ring and return the least-loaded connection. Falls back to pure
         # round-robin when all conns are equally loaded (typical idle state).
         # Early-exits at in_flight == 0 to keep this cheap on the hot path.
+        n_conns = len(self.conns)
+        if self.index >= n_conns:
+            self.index = 0
+
         best_idx = self.index
         best_load = self.conns[best_idx].in_flight
         if best_load != 0:
-            for offset in range(1, self.size):
+            for offset in range(1, n_conns):
                 idx = self.index + offset
-                if idx >= self.size:
-                    idx -= self.size
+                if idx >= n_conns:
+                    idx -= n_conns
                 load = self.conns[idx].in_flight
                 if load < best_load:
                     best_idx = idx
@@ -222,7 +226,7 @@ class SocketPool:
                     if load == 0:
                         break
         next_start = best_idx + 1
-        self.index = 0 if next_start == self.size else next_start
+        self.index = 0 if next_start >= n_conns else next_start
         return self.conns[best_idx]
 
     async def create_socket_connections(self) -> None:

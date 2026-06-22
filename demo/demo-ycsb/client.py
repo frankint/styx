@@ -129,7 +129,8 @@ def benchmark_runner(proc_num) -> dict[bytes, dict]:
             print("KILL -> styx-worker-1 done")
         sec_start = timer()
         
-        current_tps = load_schedule.get_tps(second)
+        global_tps = load_schedule.get_tps(second)
+        current_tps = max(1, global_tps // threads)
         sleeps_per_second = 100 if current_tps > 100 else 1
         step = max(1, current_tps // sleeps_per_second)
         

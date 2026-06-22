@@ -19,7 +19,12 @@ echo "use_composite_keys: $use_composite_keys"
 echo "enable_autoscale: $enable_autoscale"
 
 threaded_scale_factor=$(( (scale_factor + threads_per_worker - 1) / threads_per_worker ))
-# Enforce minimum
+# Override worker count if INITIAL_WORKERS is set (used for autoscaling experiments)
+if [[ -n "${INITIAL_WORKERS:-}" && "${INITIAL_WORKERS}" -gt 0 ]]; then
+    echo "OVERWRITE: using INITIAL_WORKERS=${INITIAL_WORKERS} instead of computed ${threaded_scale_factor}"
+    threaded_scale_factor=${INITIAL_WORKERS}
+fi
+# Enforce minimum number of active workers
 (( threaded_scale_factor < minimum_amount_of_workers )) && threaded_scale_factor=$minimum_amount_of_workers
 echo "threaded_scale_factor: $threaded_scale_factor"
 echo "====================================================="

@@ -17,13 +17,13 @@ saving_dir=$8
 warmup_seconds=$9
 epoch_size=${10}
 workload_profile=${11}
-num_standby_workers=${12:-1}
+num_standby_workers=${12:-$n_part}
 [ -n "${13}" ] && styx_threads_per_worker=${13}
 [ -n "${14}" ] && enable_compression=${14}
 [ -n "${15}" ] && use_composite_keys=${15}
 [ -n "${16}" ] && regenerate_tpcc_data=${16}
 kill_at="-1" 
-autoscaling_enabled="true"
+autoscaling_enabled="${ENABLE_AUTOSCALE:-true}"
 
 # Deployment mode configuration (read from environment).
 # Modes: docker-compose | k8s-minikube | k8s-cluster
@@ -75,7 +75,7 @@ _k8s_setup() {
 }
 
 case "$workload_profile" in
-    constant|increasing|decreasing|random|cosine|step) ;;
+    constant|increasing|decreasing|random|cosine|step|alibaba) ;;
     *)
         echo "ERROR: Unknown workload profile: $workload_profile"
         exit 1
@@ -89,6 +89,7 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
 
 else
     # docker-compose mode
+    export INITIAL_WORKERS=${INITIAL_WORKERS:-1}
     bash scripts/start_styx_cluster.sh "$n_part" "$epoch_size" "$styx_threads_per_worker" "$enable_compression" "$use_composite_keys" "$autoscaling_enabled"
     docker compose --profile autoscale up --scale worker-standby="$num_standby_workers" -d worker-standby >/dev/null
 
@@ -168,6 +169,11 @@ if [[ "$DEPLOY_MODE" == "k8s-minikube" || "$DEPLOY_MODE" == "k8s-cluster" ]]; th
     fi
     #bash scripts/uninstall_styx_cluster_with_helm.sh
 else
+    echo "=================================================="
+    echo "Exporting Prometheus metrics to CSV..."
+    python scripts/export_metrics_to_csv.py || echo "Warning: Failed to export metrics to CSV."
+    echo "=================================================="
+
     #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
     docker compose stop coordinator worker worker-standby
 fi
