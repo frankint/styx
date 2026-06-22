@@ -210,6 +210,10 @@ class AriaProtocol(BaseTransactionalProtocol):
     async def wait_stopped(self) -> None:
         await self.stopped.wait()
 
+    def reset_sync_barriers(self) -> None:
+        for event in self.sync_workers_event.values():
+            event.clear()
+
     async def stop(self) -> None:
         await self.ingress.stop()
         await self.egress.stop()
