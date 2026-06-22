@@ -72,6 +72,7 @@ S3_INIT_RETRY_SEC: float = float(os.getenv("S3_INIT_RETRY_SEC", "2"))
 S3_INIT_MAX_RETRIES: int = int(os.getenv("S3_INIT_MAX_RETRIES", "30"))
 
 SEQUENCE_MAX_SIZE: int = int(os.getenv("SEQUENCE_MAX_SIZE", "1_000"))
+ASYNC_MIGRATION_BATCH_SIZE: int = int(os.getenv("ASYNC_MIGRATION_BATCH_SIZE", "2000"))
 FORECASTER_FORECAST_INTERVAL: float = float(os.getenv("FORECASTER_FORECAST_INTERVAL", "2.0"))
 
 CoordHandler = Callable[[StreamWriter, bytes, concurrent.futures.ProcessPoolExecutor], Awaitable[None]]
@@ -316,6 +317,7 @@ class CoordinatorService:
 
         self.last_scale_action_time: float = time.time()
         self.scale_window_seconds: int = 10
+        self.migration_time_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
         self.epoch_duration_window = SlidingWindowMetric(self.scale_window_seconds)
         self.tps_sliding_window: SlidingWindowMetric = SlidingWindowMetric(self.scale_window_seconds)
 
