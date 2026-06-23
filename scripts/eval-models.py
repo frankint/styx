@@ -244,6 +244,16 @@ def run_simulation(df, params):
 
         step_time = time.time() - step_start
 
+        inference_times.append(step_time)
+        
+        current_ctx = len(history)
+        if current_ctx not in times_by_context:
+            times_by_context[current_ctx] = []
+        times_by_context[current_ctx].append(step_time)
+        
+        if current_ctx == context_length:
+            full_context_inference_times.append(step_time)
+
         target_idx = i + HORIZON
         if target_idx < len(df):
             predictions[target_idx] = forecasts[-1]
