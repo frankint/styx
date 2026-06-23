@@ -12,6 +12,13 @@ pip install -r requirements.txt
 pip install river==0.24.2 --no-deps
 ```
 
+Downloading the Chronos model:
+```
+mkdir -p models/chronos-2
+pip install -U "huggingface_hub[cli]"
+hf download amazon/chronos-2 --local-dir models/chronos-2
+```
+
 ## Offline Analysis
 
 The first step is to run all the simulations. `./scripts/eval-models.py` contains a param grid where all the parameters to be explored can be filled in. While this configuration matches the paper's original results, running it can be time-consuming. To speed things up, you can prune the `PARAM_GRID` by removing certain context lengths (e.g., 10, 50, or 100). Run this script using the following command:
