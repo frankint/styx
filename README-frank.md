@@ -11,6 +11,12 @@ pip install styx-package/.
 pip install -r requirements.txt
 pip install river==0.24.2 --no-deps
 ```
+Downloading the Chronos model:
+```
+mkdir -p models/chronos-2
+pip install -U "huggingface_hub[cli]"
+hf download amazon/chronos-2 --local-dir models/chronos-2
+```
 
 ## Offline Analysis
 
