@@ -42,6 +42,7 @@ export ENABLE_AUTOSCALE=true
 export INITIAL_WORKERS=1
 export FORECASTER_TYPE=custom_chronos
 export FORECASTER_MAX_CONTEXT_LENGTH=1000
+export EXPERIMENT_LABEL=custom_chronos
 ./scripts/run_autoscale_experiment.sh dhr 5000 1000000 1 0.0 1 740 results 10 400 alibaba 6
 ./scripts/stop_styx_cluster.sh
 ```
@@ -50,6 +51,3 @@ At this point all the csv's of the run are stored in `results/`. To see the grap
 python scripts/plot-experiment-data.py
 ```
 The resulting plots will be stored in the current directory (If you ran `run_all_experiments.sh` and no other experiments were stored there the first will be Chronos, the second LSTM, the third will be GRU, the fourth River and the last three will be 7, 5, and 4 workers).
-
-
-Note: the title will most likely say unknow model, this is because I manually added the names `_custom_chronos`, `_lstm`, `_gru`, `_river` and `_xworkers`(where x is the number of workers) respectively to the end of the directory name for each run in `./results/` which the `plot-experiment-data.py` would recognize. 

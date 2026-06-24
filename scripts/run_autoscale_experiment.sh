@@ -174,6 +174,17 @@ else
     python scripts/export_metrics_to_csv.py || echo "Warning: Failed to export metrics to CSV."
     echo "=================================================="
 
+    # Rename the results folder to include the experiment label so that
+    # plot-experiment-data.py can detect the model name automatically.
+    if [[ -n "${EXPERIMENT_LABEL:-}" ]]; then
+        latest_dir=$(ls -dt "${saving_dir}"/*/  2>/dev/null | head -1 | sed 's|/$||')
+        if [[ -n "$latest_dir" && ! "$latest_dir" == *"_${EXPERIMENT_LABEL}" ]]; then
+            new_dir="${latest_dir}_${EXPERIMENT_LABEL}"
+            mv "$latest_dir" "$new_dir"
+            echo "Renamed results folder: $(basename "$latest_dir") -> $(basename "$new_dir")"
+        fi
+    fi
+
     #bash scripts/stop_styx_cluster.sh "$styx_threads_per_worker"
     docker compose stop coordinator worker worker-standby
 fi
