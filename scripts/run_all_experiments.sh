@@ -24,6 +24,7 @@ export INITIAL_WORKERS=1
 echo ">>> 1. Running CHRONOS"
 export FORECASTER_TYPE=custom_chronos
 export FORECASTER_MAX_CONTEXT_LENGTH=1000
+export EXPERIMENT_LABEL=custom_chronos
 $CMD_AUTOSCALE
 cleanup
 
@@ -34,6 +35,7 @@ export RNN_HIDDEN_SIZE=32
 export RNN_NUM_LAYERS=1
 export RNN_LEARNING_RATE=0.01
 export DOWNSAMPLE_RATE=2
+export EXPERIMENT_LABEL=lstm
 $CMD_AUTOSCALE
 cleanup
 
@@ -44,6 +46,7 @@ export RNN_HIDDEN_SIZE=16
 export RNN_NUM_LAYERS=2
 export RNN_LEARNING_RATE=0.01
 export DOWNSAMPLE_RATE=5
+export EXPERIMENT_LABEL=gru
 $CMD_AUTOSCALE
 cleanup
 
@@ -55,6 +58,7 @@ export RIVER_P=5
 export RIVER_D=1
 export RIVER_Q=2
 export RIVER_M=30
+export EXPERIMENT_LABEL=river
 $CMD_AUTOSCALE
 cleanup
 unset RIVER_P RIVER_D RIVER_Q RIVER_M
@@ -71,6 +75,7 @@ unset FORECASTER_TYPE
 for workers in 7 5 4; do
     echo ">>> Running NO AUTOSCALING with INITIAL_WORKERS=$workers"
     export INITIAL_WORKERS=$workers
+    export EXPERIMENT_LABEL="${workers}workers"
     $CMD_NO_AUTOSCALE
     cleanup
 done

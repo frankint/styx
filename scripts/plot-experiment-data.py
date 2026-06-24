@@ -30,6 +30,7 @@ def normalize_time(series):
 
 def render_layout(layout_type, dir_name, plot_title, is_fixed, loaded_data, scaling_times, shortest_duration):
     """Renders and saves a specific layout configuration as an SVG with dynamic font scaling."""
+    svg_base = re.sub(r'[^\w]+', '_', plot_title.lower()).strip('_')
     num_plots = 3 if is_fixed else 4
 
     # --- DYNAMIC PAPER SCALING ---
@@ -180,7 +181,7 @@ def render_layout(layout_type, dir_name, plot_title, is_fixed, loaded_data, scal
                 fontsize=rc_params['legend.fontsize'], borderpad=0.4, handletextpad=0.5
             )
         
-        output_filename = f"{dir_name}_metrics{suffix}.svg"
+        output_filename = f"{svg_base}_metrics{suffix}.svg"
         plt.savefig(output_filename, format='svg', bbox_inches='tight')
         plt.close(fig)
 
@@ -195,8 +196,8 @@ def process_directory(directory_path):
         num_workers = fixed_match.group(1)
         plot_title = f"Fixed {num_workers} Workers"
     else:
-        model_name = "Unknown Model"
-        if "chronos" in dir_lower:
+        model_name = None
+        if "custom_chronos" in dir_lower or "chronos" in dir_lower:
             model_name = "Chronos"
         elif "lstm" in dir_lower:
             model_name = "LSTM"
@@ -204,6 +205,8 @@ def process_directory(directory_path):
             model_name = "River (SNARIMAX)"
         elif "gru" in dir_lower:
             model_name = "GRU"
+        if model_name is None:
+            model_name = dir_name
         plot_title = f"Autoscaling: {model_name}"
 
     TARGET_FILES_MAP = {
@@ -296,11 +299,12 @@ def process_directory(directory_path):
     print("-" * 50)
     # ----------------------------------------
 
+    svg_base = re.sub(r'[^\w]+', '_', plot_title.lower()).strip('_')
     layouts = ['vertical', '2x2', 'horizontal']
     for layout in layouts:
         render_layout(layout, dir_name, plot_title, is_fixed, loaded_data, scaling_times, shortest_duration)
         
-    print(f"Generated all 3 SVG layouts for {dir_name}\n")
+    print(f"Generated all 3 SVG layouts for '{plot_title}' (base name: {svg_base}_metrics*.svg)\n")
 
 
 def batch_process_experiments(base_directory):
